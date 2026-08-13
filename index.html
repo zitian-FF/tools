@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wiki Multi-Language Styling Tool</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="app-header">
+  <h1>Wiki Multi-Language Styling Tool</h1>
+  <p class="subtitle">Style once in English, auto-generate ready-to-paste sourcecode for 13 languages.</p>
+</header>
+
+<main>
+  <section class="panel input-panel">
+    <h2>1. Paste EN sourcecode</h2>
+    <textarea id="en-source" placeholder="Paste the styled English wiki sourcecode here…" spellcheck="false"></textarea>
+
+    <h2>2. Upload translation Excel (.xlsx)</h2>
+    <div id="drop-zone" class="drop-zone">
+      <p><strong>Drag &amp; drop</strong> your .xlsx file here, or</p>
+      <label class="file-picker-label">
+        Choose file
+        <input type="file" id="file-input" accept=".xlsx" hidden>
+      </label>
+      <p id="file-name" class="file-name"></p>
+    </div>
+
+    <div id="sheet-select-wrap" class="sheet-select-wrap hidden">
+      <label for="sheet-select">Sheet (wiki page):</label>
+      <select id="sheet-select"></select>
+    </div>
+
+    <button id="process-btn" class="process-btn" disabled>Generate translations</button>
+    <p id="global-error" class="global-error hidden"></p>
+  </section>
+
+  <section class="panel output-panel">
+    <h2>3. Copy per-language sourcecode</h2>
+    <p id="output-placeholder" class="output-placeholder">Paste EN sourcecode and upload the translation Excel, then click "Generate translations".</p>
+    <div id="output-grid" class="output-grid"></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,82 @@
+{
+  "description": "Language code lookup table for the Wiki Multi-Language Tool. 'code' is the authoritative/de facto file-naming convention (output). 'mutations' lists all recognized input variants, including raw Excel column headers, that should be normalized to this language.",
+  "ignored_languages": [
+    {
+      "name": "Chinese (Simplified)",
+      "note": "Not one of the 14 output languages. Recognized as input and skipped, not treated as an error.",
+      "mutations": ["CN", "简体", "简体中文"]
+    }
+  ],
+  "languages": [
+    {
+      "name": "English",
+      "code": "EN",
+      "mutations": ["EN", "English"]
+    },
+    {
+      "name": "Chinese (Traditional)",
+      "code": "TW",
+      "mutations": ["TW", "zh_TW", "繁體中文", "繁體", "繁体中文"]
+    },
+    {
+      "name": "Korean",
+      "code": "KR",
+      "mutations": ["KR", "ko", "KO", "한국어"]
+    },
+    {
+      "name": "Japanese",
+      "code": "JP",
+      "mutations": ["JP", "ja", "jp", "日本語"]
+    },
+    {
+      "name": "Arabic",
+      "code": "AR",
+      "mutations": ["AR", "ar", "Arab", "AH", "العربية"]
+    },
+    {
+      "name": "German",
+      "code": "DE",
+      "mutations": ["DE", "de", "DH", "Deutsch"]
+    },
+    {
+      "name": "Spanish",
+      "code": "ES",
+      "mutations": ["ES", "es", "ESP", "esp", "Español"]
+    },
+    {
+      "name": "French",
+      "code": "FR",
+      "mutations": ["FR", "fr", "Français"]
+    },
+    {
+      "name": "Indonesian",
+      "code": "ID",
+      "mutations": ["ID", "id", "IN", "Bahasa Indonesia"]
+    },
+    {
+      "name": "Italian",
+      "code": "IT",
+      "mutations": ["IT", "it", "Italiano"]
+    },
+    {
+      "name": "Portuguese",
+      "code": "PT",
+      "mutations": ["PT", "PTG", "Português"]
+    },
+    {
+      "name": "Thai",
+      "code": "TH",
+      "mutations": ["TH", "th", "ภาษาไทย"]
+    },
+    {
+      "name": "Turkish",
+      "code": "TR",
+      "mutations": ["TR", "tr", "TRK", "Türkçe"]
+    },
+    {
+      "name": "Vietnamese",
+      "code": "VN",
+      "mutations": ["VN", "vi", "VET", "VIET", "Tiếng Việt"]
+    }
+  ]
+}
