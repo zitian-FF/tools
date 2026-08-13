@@ -7,9 +7,12 @@ embedded image/video filenames to match each language's convention.
 No backend — everything (Excel parsing, matching, styling reapplication, filename
 rewriting) runs in the browser.
 
+Lives at `wiki_styler/` in this repo, deployed at
+`https://zitian-ff.github.io/tools/wiki_styler/`.
+
 ## Use
 
-Open `index.html` (or the deployed GitHub Pages URL):
+Open `wiki_styler/index.html` (or the deployed GitHub Pages URL):
 
 1. Paste the styled EN wiki sourcecode into the textarea.
 2. Upload the translation `.xlsx` (one sheet per wiki page; if the workbook has
@@ -38,11 +41,11 @@ Open `index.html` (or the deployed GitHub Pages URL):
 No build step — it's plain HTML/CSS/JS. `.xlsx` parsing uses
 [SheetJS](https://sheetjs.com) (Apache-2.0), loaded from a pinned jsDelivr CDN URL in
 `index.html` (all parsing still happens entirely in the browser — this is just where
-the library file is fetched from). Serve the directory with any static file server,
-e.g.:
+the library file is fetched from). Serve the `wiki_styler/` directory with any static
+file server, e.g.:
 
 ```
-python3 -m http.server 8000
+python3 -m http.server 8000 --directory wiki_styler
 ```
 
 ## Deployment
