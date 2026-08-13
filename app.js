@@ -175,7 +175,7 @@
           return;
         }
         if (tag === 'img' || tag === 'video') {
-          current.push({ type: 'media', html: child.outerHTML });
+          current.push({ type: 'media', html: child.outerHTML, tags: tagStack.slice() });
           return;
         }
         const tagInfo = { tag: tag, attrs: getAttrString(child) };
@@ -237,7 +237,7 @@
     while (i < segment.length) {
       const run = segment[i];
       if (run.type === 'media') {
-        groups.push({ type: 'media', html: run.html });
+        groups.push({ type: 'media', html: run.html, tags: run.tags || [] });
         i++;
         continue;
       }
@@ -303,30 +303,41 @@
     });
   }
 
-  // Builds the translated HTML for one EN segment (an array of runs).
-  // Returns { html, warnings: [{type, ...}] }
-  function buildTranslatedSegmentHtml(enSegment, translatedText) {
+  // Whether a segment's groups carry any real (non-whitespace) text.
+  function groupsHaveRealText(groups) {
+    return groups.some(function (g) { return g.type === 'text' && g.text.trim() !== ''; });
+  }
+
+  // A segment is "media-only" when it contains at least one image/video and
+  // no real translatable text — translators never see or account for these
+  // lines, so they must not consume a slot when matching against the
+  // Excel \n-split translation (Section 4.1/5.1) and must not be dropped.
+  function segmentIsMediaOnly(groups) {
+    return groups.some(function (g) { return g.type === 'media'; }) && !groupsHaveRealText(groups);
+  }
+
+  function mediaGroupHtml(g, langCode) {
+    return wrapTags(g.tags, rewriteMediaHtml(g.html, langCode));
+  }
+
+  // Reapplies EN styling (Section 5.2/5.3) to translated text, given only
+  // the EN segment's text-bearing groups (media already stripped out by the
+  // caller). Returns { html, warnings: [{type, ...}] }
+  function styleTextGroups(textGroups, translatedText) {
     const warnings = [];
 
-    if (enSegment.some(function (r) { return r.type === 'media'; })) {
-      warnings.push({ type: 'inline-media' });
+    if (textGroups.length === 0) {
       return { html: escapeHtml(translatedText), warnings: warnings };
     }
 
-    const groups = groupRuns(enSegment);
-
-    if (groups.length === 0) {
-      return { html: '', warnings: warnings };
-    }
-
-    if (groups.length === 1) {
-      const g = groups[0];
+    if (textGroups.length === 1) {
+      const g = textGroups[0];
       return { html: wrapTags(g.tags, escapeHtml(translatedText)), warnings: warnings };
     }
 
     // Mixed segment: evaluate each styled (non-empty tag) group for the
     // delimiter-anchored rule (Section 5.3).
-    const styledGroups = groups.filter(function (g) { return g.tags.length > 0; });
+    const styledGroups = textGroups.filter(function (g) { return g.tags.length > 0; });
     if (styledGroups.length === 0) {
       return { html: escapeHtml(translatedText), warnings: warnings };
     }
@@ -369,6 +380,57 @@
     return { html: html, warnings: warnings };
   }
 
+  // Builds the translated HTML for one EN segment (an array of runs) against
+  // one line of translated text. Images/videos inline within the segment are
+  // never dropped: their filenames are localized and they're re-inserted at
+  // the same relative position (before/after the translated text). Media
+  // genuinely sandwiched between two separate text runs can't be positioned
+  // exactly (translated word order differs), so it's placed after the text
+  // and flagged for a quick manual check.
+  // Returns { html, warnings: [{type, ...}] }
+  function buildTranslatedSegmentHtml(enSegment, translatedText, langCode) {
+    const warnings = [];
+    const groups = groupRuns(enSegment);
+
+    if (groups.length === 0) {
+      return { html: '', warnings: warnings };
+    }
+
+    const mediaGroups = groups.filter(function (g) { return g.type === 'media'; });
+    if (mediaGroups.length === 0) {
+      return styleTextGroups(groups, translatedText);
+    }
+
+    // Segment mixes media with real text. Split off leading media (before
+    // the first text run), trailing media (after the last text run), and
+    // any media stuck between two separate text runs.
+    let firstTextIdx = -1;
+    let lastTextIdx = -1;
+    groups.forEach(function (g, i) {
+      if (g.type === 'text') {
+        if (firstTextIdx === -1) firstTextIdx = i;
+        lastTextIdx = i;
+      }
+    });
+
+    const leadingMedia = groups.slice(0, firstTextIdx).filter(function (g) { return g.type === 'media'; });
+    const trailingMedia = groups.slice(lastTextIdx + 1).filter(function (g) { return g.type === 'media'; });
+    const interspersedMedia = groups.slice(firstTextIdx, lastTextIdx + 1).filter(function (g) { return g.type === 'media'; });
+
+    const textGroups = groups.filter(function (g) { return g.type === 'text'; });
+    const textResult = styleTextGroups(textGroups, translatedText);
+    textResult.warnings.forEach(function (w) { warnings.push(w); });
+
+    if (interspersedMedia.length > 0) {
+      warnings.push({ type: 'inline-media-approx' });
+    }
+
+    const leadHtml = leadingMedia.map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
+    const trailHtml = trailingMedia.concat(interspersedMedia).map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
+
+    return { html: leadHtml + textResult.html + trailHtml, warnings: warnings };
+  }
+
   function formatSegmentWarning(w, blockIndex, segIndex) {
     const loc = 'Block ' + (blockIndex + 1) + ', segment ' + (segIndex + 1);
     if (w.type === 'unresolved-style') {
@@ -377,17 +439,17 @@
     if (w.type === 'term-count-mismatch') {
       return loc + ': bracket/quote term count mismatch (EN styled span has ' + w.enCount + ', translation has ' + w.foundCount + ') — styling skipped, please review.';
     }
-    if (w.type === 'inline-media') {
-      return loc + ': contains an inline image/video mixed with text — left unstyled, please review manually.';
+    if (w.type === 'inline-media-approx') {
+      return loc + ': image/video sits between two separate runs of text mid-sentence — placed after the translated text rather than in its exact original spot; please verify placement.';
     }
     return loc + ': could not be automatically resolved — please review manually.';
   }
 
-  function reconstructEnBlockHtml(block) {
+  function reconstructEnBlockHtml(block, langCode) {
     const segs = block.segments.map(function (seg) {
       const groups = groupRuns(seg);
       return groups.map(function (g) {
-        if (g.type === 'media') return g.html;
+        if (g.type === 'media') return mediaGroupHtml(g, langCode);
         return wrapTags(g.tags, escapeHtml(g.text));
       }).join('');
     });
@@ -399,31 +461,45 @@
     return inner;
   }
 
-  function buildTranslatedTextBlock(block, cellText, blockIndex, warnings) {
+  function buildTranslatedTextBlock(block, cellText, blockIndex, warnings, langCode) {
     const enSegments = block.segments;
-    const translatedSegments = String(cellText == null ? '' : cellText).replace(/\r\n?/g, '\n').split('\n');
+    const enGroupsPerSeg = enSegments.map(groupRuns);
+    // Segments that are image/video only never appear in the translator's
+    // Excel cell (Section 4.1 — cell text is plain text only), so they must
+    // not consume a slot when matching against the \n-split translation.
+    const mediaOnly = enGroupsPerSeg.map(segmentIsMediaOnly);
 
-    if (translatedSegments.length !== enSegments.length) {
+    const translatedSegments = String(cellText == null ? '' : cellText).replace(/\r\n?/g, '\n').split('\n');
+    const expectedTranslatable = enSegments.length - mediaOnly.filter(Boolean).length;
+
+    if (translatedSegments.length !== expectedTranslatable) {
       warnings.push({
-        message: 'Block ' + (blockIndex + 1) + ': line/paragraph count mismatch (EN has ' + enSegments.length +
-          ' segment(s), translation has ' + translatedSegments.length + ') — check the translator\'s line breaks.'
+        message: 'Block ' + (blockIndex + 1) + ': line/paragraph count mismatch (EN has ' + expectedTranslatable +
+          ' translatable segment(s), excluding image/video-only lines; translation has ' + translatedSegments.length +
+          ') — check the translator\'s line breaks.'
       });
     }
 
-    const n = Math.max(enSegments.length, translatedSegments.length);
     const outSegs = [];
-    for (let i = 0; i < n; i++) {
-      const enSeg = enSegments[i];
-      const trText = translatedSegments[i] !== undefined ? translatedSegments[i] : '';
-      if (!enSeg) {
-        outSegs.push(escapeHtml(trText));
+    let trCursor = 0;
+    for (let i = 0; i < enSegments.length; i++) {
+      if (mediaOnly[i]) {
+        outSegs.push(enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join(''));
         continue;
       }
-      const result = buildTranslatedSegmentHtml(enSeg, trText);
+      const trText = trCursor < translatedSegments.length ? translatedSegments[trCursor] : '';
+      trCursor++;
+      const result = buildTranslatedSegmentHtml(enSegments[i], trText, langCode);
       result.warnings.forEach(function (w) {
         warnings.push({ message: formatSegmentWarning(w, blockIndex, i) });
       });
       outSegs.push(result.html);
+    }
+    // Extra translated lines beyond what the EN structure expected (already
+    // flagged above) are appended as-is rather than silently dropped.
+    while (trCursor < translatedSegments.length) {
+      outSegs.push(escapeHtml(translatedSegments[trCursor]));
+      trCursor++;
     }
 
     const innerHtml = outSegs.join('<br>');
@@ -465,13 +541,13 @@
       }
       if (rowCursor >= contentRows.length) {
         warnings.push({ message: 'Block ' + (bi + 1) + ': ran out of Excel content rows to match — EN text used as a placeholder, please review.' });
-        parts.push(reconstructEnBlockHtml(block));
+        parts.push(reconstructEnBlockHtml(block, code));
         continue;
       }
       const row = contentRows[rowCursor++];
       const cellText = row.cells[code];
       const blockWarnings = [];
-      parts.push(buildTranslatedTextBlock(block, cellText, bi, blockWarnings));
+      parts.push(buildTranslatedTextBlock(block, cellText, bi, blockWarnings, code));
       blockWarnings.forEach(function (w) { warnings.push(w); });
     }
 
