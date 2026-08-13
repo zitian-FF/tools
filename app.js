@@ -454,14 +454,17 @@
     if (w.type === 'unexpected-text-in-blank-segment') {
       return loc + ': EN has a blank line here but the translation has text — kept as plain unstyled text; please check this is aligned to the right line.';
     }
+    if (w.type === 'ran-out-of-lines') {
+      return loc + ': ran out of translated lines for this language — EN text used as a placeholder, please review.';
+    }
     return loc + ': could not be automatically resolved — please review manually.';
   }
 
   // A text block (e.g. a stray "<p></p>" from copy/paste) that has no real
   // text and no media anywhere in it has nothing for a translator to have
-  // ever seen or typed a line for — it must not consume an Excel row (that
-  // would push every later block onto the wrong row). It's reproduced as-is
-  // for every language instead.
+  // ever seen or typed a line for — it must not consume a translated line
+  // (that would push every later segment in the document onto the wrong
+  // line). It's reproduced as-is for every language instead.
   function blockHasContent(block) {
     return block.segments.some(function (seg) {
       return groupRuns(seg).some(function (g) {
@@ -470,14 +473,15 @@
     });
   }
 
+  function reconstructSegmentHtml(groups, langCode) {
+    return groups.map(function (g) {
+      if (g.type === 'media') return mediaGroupHtml(g, langCode);
+      return wrapTags(g.tags, escapeHtml(g.text));
+    }).join('');
+  }
+
   function reconstructEnBlockHtml(block, langCode) {
-    const segs = block.segments.map(function (seg) {
-      const groups = groupRuns(seg);
-      return groups.map(function (g) {
-        if (g.type === 'media') return mediaGroupHtml(g, langCode);
-        return wrapTags(g.tags, escapeHtml(g.text));
-      }).join('');
-    });
+    const segs = block.segments.map(function (seg) { return reconstructSegmentHtml(groupRuns(seg), langCode); });
     const inner = segs.join('<br>');
     if (block.tag) {
       const attrs = block.attrs ? ' ' + block.attrs : '';
@@ -486,53 +490,77 @@
     return inner;
   }
 
-  function buildTranslatedTextBlock(block, cellText, blockIndex, warnings, langCode) {
+  // ---------------------------------------------------------------------
+  // Global (whole-document) line matching
+  //
+  // A single EN <p> does not reliably correspond to a single Excel row —
+  // real wiki pages routinely combine what the translation sheet treats as
+  // several rows into one paragraph (or vice versa), using "\n\n" inside a
+  // cell rather than separate <p> tags. Matching row-by-row against
+  // <p>-by-<p> breaks the moment that assumption doesn't hold.
+  //
+  // Instead, every row's cell text for a language is flattened into one
+  // continuous ordered line sequence (Section 4.1's row order = block order
+  // guarantee still applies, just at the whole-document level rather than
+  // per block), and every real (non-media-only) EN segment across the whole
+  // document is matched positionally against that sequence, regardless of
+  // which <p> either side of the pair happens to sit in.
+  // ---------------------------------------------------------------------
+  function flattenLangLines(contentRows, code) {
+    const lines = [];
+    contentRows.forEach(function (row) {
+      const cellText = row.cells[code];
+      String(cellText == null ? '' : cellText).replace(/\r\n?/g, '\n').split('\n').forEach(function (l) {
+        lines.push(l);
+      });
+    });
+    return lines;
+  }
+
+  function countRealSegments(blocks) {
+    let count = 0;
+    blocks.forEach(function (block) {
+      if (block.type !== 'text' || !blockHasContent(block)) return;
+      block.segments.forEach(function (seg) {
+        if (!segmentIsMediaOnly(groupRuns(seg))) count++;
+      });
+    });
+    return count;
+  }
+
+  // Renders one EN block against the shared global line cursor. Returns
+  // { html, nextCursor }.
+  function buildTranslatedTextBlockGlobal(block, allLines, startCursor, blockIndex, warnings, langCode) {
     const enSegments = block.segments;
     const enGroupsPerSeg = enSegments.map(groupRuns);
-    // Segments that are image/video only never appear in the translator's
-    // Excel cell (Section 4.1 — cell text is plain text only), so they must
-    // not consume a slot when matching against the \n-split translation.
     const mediaOnly = enGroupsPerSeg.map(segmentIsMediaOnly);
 
-    const translatedSegments = String(cellText == null ? '' : cellText).replace(/\r\n?/g, '\n').split('\n');
-    const expectedTranslatable = enSegments.length - mediaOnly.filter(Boolean).length;
-
-    if (translatedSegments.length !== expectedTranslatable) {
-      warnings.push({
-        message: 'Block ' + (blockIndex + 1) + ': line/paragraph count mismatch (EN has ' + expectedTranslatable +
-          ' translatable segment(s), excluding image/video-only lines; translation has ' + translatedSegments.length +
-          ') — check the translator\'s line breaks.'
-      });
-    }
-
     const outSegs = [];
-    let trCursor = 0;
+    let cursor = startCursor;
     for (let i = 0; i < enSegments.length; i++) {
       if (mediaOnly[i]) {
         outSegs.push(enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join(''));
         continue;
       }
-      const trText = trCursor < translatedSegments.length ? translatedSegments[trCursor] : '';
-      trCursor++;
+      if (cursor >= allLines.length) {
+        warnings.push({ message: formatSegmentWarning({ type: 'ran-out-of-lines' }, blockIndex, i) });
+        outSegs.push(reconstructSegmentHtml(enGroupsPerSeg[i], langCode));
+        continue;
+      }
+      const trText = allLines[cursor];
+      cursor++;
       const result = buildTranslatedSegmentHtml(enSegments[i], trText, langCode);
       result.warnings.forEach(function (w) {
         warnings.push({ message: formatSegmentWarning(w, blockIndex, i) });
       });
       outSegs.push(result.html);
     }
-    // Extra translated lines beyond what the EN structure expected (already
-    // flagged above) are appended as-is rather than silently dropped.
-    while (trCursor < translatedSegments.length) {
-      outSegs.push(escapeHtml(translatedSegments[trCursor]));
-      trCursor++;
-    }
 
     const innerHtml = outSegs.join('<br>');
-    if (block.tag) {
-      const attrs = block.attrs ? ' ' + block.attrs : '';
-      return '<' + block.tag + attrs + '>' + innerHtml + '</' + block.tag + '>';
-    }
-    return innerHtml;
+    const html = block.tag
+      ? '<' + block.tag + (block.attrs ? ' ' + block.attrs : '') + '>' + innerHtml + '</' + block.tag + '>'
+      : innerHtml;
+    return { html: html, nextCursor: cursor };
   }
 
   // ---------------------------------------------------------------------
@@ -555,9 +583,20 @@
   // ---------------------------------------------------------------------
   function generateLanguageOutput(blocks, contentRows, code, name) {
     const warnings = [];
-    let rowCursor = 0;
-    const parts = [];
+    const allLines = flattenLangLines(contentRows, code);
+    const totalReal = countRealSegments(blocks);
 
+    if (allLines.length !== totalReal) {
+      warnings.push({
+        message: 'Total translatable line count mismatch: the EN sourcecode has ' + totalReal +
+          ' line(s) to translate (excluding image/video-only lines), but this language\'s Excel rows have ' +
+          allLines.length + ' line(s) in total across all rows — line-by-line matching may be misaligned ' +
+          'from wherever the counts first diverge. Check the translator\'s line breaks against the EN source.'
+      });
+    }
+
+    let cursor = 0;
+    const parts = [];
     for (let bi = 0; bi < blocks.length; bi++) {
       const block = blocks[bi];
       if (block.type === 'media') {
@@ -568,20 +607,15 @@
         parts.push(reconstructEnBlockHtml(block, code));
         continue;
       }
-      if (rowCursor >= contentRows.length) {
-        warnings.push({ message: 'Block ' + (bi + 1) + ': ran out of Excel content rows to match — EN text used as a placeholder, please review.' });
-        parts.push(reconstructEnBlockHtml(block, code));
-        continue;
-      }
-      const row = contentRows[rowCursor++];
-      const cellText = row.cells[code];
       const blockWarnings = [];
-      parts.push(buildTranslatedTextBlock(block, cellText, bi, blockWarnings, code));
+      const result = buildTranslatedTextBlockGlobal(block, allLines, cursor, bi, blockWarnings, code);
+      cursor = result.nextCursor;
+      parts.push(result.html);
       blockWarnings.forEach(function (w) { warnings.push(w); });
     }
 
-    if (rowCursor < contentRows.length) {
-      warnings.push({ message: 'Note: ' + (contentRows.length - rowCursor) + ' extra Excel row(s) below the last block were not used (more rows than blocks in the EN sourcecode).' });
+    if (cursor < allLines.length) {
+      warnings.push({ message: 'Note: ' + (allLines.length - cursor) + ' extra translated line(s) across the Excel rows were not used.' });
     }
 
     return { code: code, name: name, html: parts.join(''), warnings: warnings };
