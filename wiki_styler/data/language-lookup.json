@@ -1,5 +1,5 @@
 {
-  "description": "Language code lookup table for the Wiki Multi-Language Tool. 'code' is the authoritative/de facto file-naming convention (output). 'mutations' lists all recognized input variants, including raw Excel column headers, that should be normalized to this language.",
+  "description": "Language code lookup table for the Wiki Multi-Language Tool. 'code' is the authoritative/de facto file-naming convention (output). 'mutations' lists all recognized input variants, including raw Excel column headers, that should be normalized to this language. 'sentence_terminators' lists the punctuation marks that end a sentence in that language, used as a fallback match unit when a block's line count doesn't match between EN and the translation; an empty list (or sentence_splitting_supported: false) means sentence-level matching isn't attempted for that language.",
   "ignored_languages": [
     {
       "name": "Chinese (Simplified)",
@@ -11,72 +11,87 @@
     {
       "name": "English",
       "code": "EN",
-      "mutations": ["EN", "English"]
+      "mutations": ["EN", "English"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Chinese (Traditional)",
       "code": "TW",
-      "mutations": ["TW", "zh_TW", "繁體中文", "繁體", "繁体中文"]
+      "mutations": ["TW", "zh_TW", "繁體中文", "繁體", "繁体中文"],
+      "sentence_terminators": ["。", "！", "？"]
     },
     {
       "name": "Korean",
       "code": "KR",
-      "mutations": ["KR", "ko", "KO", "한국어"]
+      "mutations": ["KR", "ko", "KO", "한국어"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Japanese",
       "code": "JP",
-      "mutations": ["JP", "ja", "jp", "日本語"]
+      "mutations": ["JP", "ja", "jp", "日本語"],
+      "sentence_terminators": ["。", "！", "？"]
     },
     {
       "name": "Arabic",
       "code": "AR",
-      "mutations": ["AR", "ar", "Arab", "AH", "العربية"]
+      "mutations": ["AR", "ar", "Arab", "AH", "العربية"],
+      "sentence_terminators": [".", "!", "؟"]
     },
     {
       "name": "German",
       "code": "DE",
-      "mutations": ["DE", "de", "DH", "Deutsch"]
+      "mutations": ["DE", "de", "DH", "Deutsch"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Spanish",
       "code": "ES",
-      "mutations": ["ES", "es", "ESP", "esp", "Español"]
+      "mutations": ["ES", "es", "ESP", "esp", "Español"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "French",
       "code": "FR",
-      "mutations": ["FR", "fr", "Français"]
+      "mutations": ["FR", "fr", "Français"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Indonesian",
       "code": "ID",
-      "mutations": ["ID", "id", "IN", "Bahasa Indonesia"]
+      "mutations": ["ID", "id", "IN", "Bahasa Indonesia"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Italian",
       "code": "IT",
-      "mutations": ["IT", "it", "Italiano"]
+      "mutations": ["IT", "it", "Italiano"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Portuguese",
       "code": "PT",
-      "mutations": ["PT", "PTG", "Português"]
+      "mutations": ["PT", "PTG", "Português"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Thai",
       "code": "TH",
-      "mutations": ["TH", "th", "ภาษาไทย"]
+      "mutations": ["TH", "th", "ภาษาไทย"],
+      "sentence_terminators": [],
+      "sentence_splitting_supported": false
     },
     {
       "name": "Turkish",
       "code": "TR",
-      "mutations": ["TR", "tr", "TRK", "Türkçe"]
+      "mutations": ["TR", "tr", "TRK", "Türkçe"],
+      "sentence_terminators": [".", "!", "?"]
     },
     {
       "name": "Vietnamese",
       "code": "VN",
-      "mutations": ["VN", "vi", "VET", "VIET", "Tiếng Việt"]
+      "mutations": ["VN", "vi", "VET", "VIET", "Tiếng Việt"],
+      "sentence_terminators": [".", "!", "?"]
     }
   ]
 }
