@@ -13,20 +13,20 @@
       { "name": "Chinese (Simplified)", "mutations": ["CN", "简体", "简体中文"] }
     ],
     "languages": [
-      { "name": "English", "code": "EN", "mutations": ["EN", "English"] },
-      { "name": "Chinese (Traditional)", "code": "TW", "mutations": ["TW", "zh_TW", "繁體中文", "繁體", "繁体中文"] },
-      { "name": "Korean", "code": "KR", "mutations": ["KR", "ko", "KO", "한국어"] },
-      { "name": "Japanese", "code": "JP", "mutations": ["JP", "ja", "jp", "日本語"] },
-      { "name": "Arabic", "code": "AR", "mutations": ["AR", "ar", "Arab", "AH", "العربية"] },
-      { "name": "German", "code": "DE", "mutations": ["DE", "de", "DH", "Deutsch"] },
-      { "name": "Spanish", "code": "ES", "mutations": ["ES", "es", "ESP", "esp", "Español"] },
-      { "name": "French", "code": "FR", "mutations": ["FR", "fr", "Français"] },
-      { "name": "Indonesian", "code": "ID", "mutations": ["ID", "id", "IN", "Bahasa Indonesia"] },
-      { "name": "Italian", "code": "IT", "mutations": ["IT", "it", "Italiano"] },
-      { "name": "Portuguese", "code": "PT", "mutations": ["PT", "PTG", "Português"] },
-      { "name": "Thai", "code": "TH", "mutations": ["TH", "th", "ภาษาไทย"] },
-      { "name": "Turkish", "code": "TR", "mutations": ["TR", "tr", "TRK", "Türkçe"] },
-      { "name": "Vietnamese", "code": "VN", "mutations": ["VN", "vi", "VET", "VIET", "Tiếng Việt"] }
+      { "name": "English", "code": "EN", "mutations": ["EN", "English"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Chinese (Traditional)", "code": "TW", "mutations": ["TW", "zh_TW", "繁體中文", "繁體", "繁体中文"], "sentence_terminators": ["。", "！", "？"] },
+      { "name": "Korean", "code": "KR", "mutations": ["KR", "ko", "KO", "한국어"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Japanese", "code": "JP", "mutations": ["JP", "ja", "jp", "日本語"], "sentence_terminators": ["。", "！", "？"] },
+      { "name": "Arabic", "code": "AR", "mutations": ["AR", "ar", "Arab", "AH", "العربية"], "sentence_terminators": [".", "!", "؟"] },
+      { "name": "German", "code": "DE", "mutations": ["DE", "de", "DH", "Deutsch"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Spanish", "code": "ES", "mutations": ["ES", "es", "ESP", "esp", "Español"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "French", "code": "FR", "mutations": ["FR", "fr", "Français"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Indonesian", "code": "ID", "mutations": ["ID", "id", "IN", "Bahasa Indonesia"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Italian", "code": "IT", "mutations": ["IT", "it", "Italiano"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Portuguese", "code": "PT", "mutations": ["PT", "PTG", "Português"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Thai", "code": "TH", "mutations": ["TH", "th", "ภาษาไทย"], "sentence_terminators": [], "sentence_splitting_supported": false },
+      { "name": "Turkish", "code": "TR", "mutations": ["TR", "tr", "TRK", "Türkçe"], "sentence_terminators": [".", "!", "?"] },
+      { "name": "Vietnamese", "code": "VN", "mutations": ["VN", "vi", "VET", "VIET", "Tiếng Việt"], "sentence_terminators": [".", "!", "?"] }
     ]
   };
 
@@ -107,18 +107,23 @@
 
   function extractContentRows(matrix, headerRowIdx, columnMap) {
     const langCols = [];
-    const otherCols = [];
     columnMap.forEach(function (c, idx) {
       if (c.type === 'lang') langCols.push(idx);
-      else if (c.type === 'other') otherCols.push(idx);
     });
+    // Column A (the non-language "Language" label column in the sample sheet)
+    // carries a value only on metadata rows (Checker, Proofread check, ...);
+    // content rows leave it empty. A blank language cell on such a row (e.g.
+    // no checker assigned yet) is metadata, not a translation gap, so this
+    // must be checked before — not in place of — real content detection.
+    // Only trust this signal when column A isn't itself a language column.
+    const colAIsLabel = columnMap[0] && columnMap[0].type !== 'lang';
     const rows = [];
     for (let r = headerRowIdx + 1; r < matrix.length; r++) {
       const row = matrix[r] || [];
+      const isMeta = colAIsLabel && String(row[0] || '').trim() !== '';
+      if (isMeta) continue;
       const anyLangContent = langCols.some(function (i) { return String(row[i] || '').trim() !== ''; });
       if (!anyLangContent) continue;
-      const isMeta = otherCols.some(function (i) { return /checker|proofread/i.test(String(row[i] || '')); });
-      if (isMeta) continue;
       const cells = {};
       langCols.forEach(function (i) {
         cells[columnMap[i].code] = String(row[i] !== undefined ? row[i] : '');
@@ -454,9 +459,6 @@
     if (w.type === 'unexpected-text-in-blank-segment') {
       return loc + ': EN has a blank line here but the translation has text — kept as plain unstyled text; please check this is aligned to the right line.';
     }
-    if (w.type === 'ran-out-of-lines') {
-      return loc + ': ran out of translated lines for this language — EN text used as a placeholder, please review.';
-    }
     return loc + ': could not be automatically resolved — please review manually.';
   }
 
@@ -491,76 +493,170 @@
   }
 
   // ---------------------------------------------------------------------
-  // Global (whole-document) line matching
+  // Per-block matching hierarchy
   //
-  // A single EN <p> does not reliably correspond to a single Excel row —
-  // real wiki pages routinely combine what the translation sheet treats as
-  // several rows into one paragraph (or vice versa), using "\n\n" inside a
-  // cell rather than separate <p> tags. Matching row-by-row against
-  // <p>-by-<p> breaks the moment that assumption doesn't hold.
+  // Matching happens independently within each Excel row/block — never
+  // globally across the sheet. A translator merging or splitting lines
+  // differently in one block (in one language) must not throw off
+  // position-matching for any other block, in that language or any other.
   //
-  // Instead, every row's cell text for a language is flattened into one
-  // continuous ordered line sequence (Section 4.1's row order = block order
-  // guarantee still applies, just at the whole-document level rather than
-  // per block), and every real (non-media-only) EN segment across the whole
-  // document is matched positionally against that sequence, regardless of
-  // which <p> either side of the pair happens to sit in.
+  // For each block, in order:
+  //   1. Line-level match: split the cell by "\n"; if the count equals the
+  //      EN block's translatable segment count, match position-for-position
+  //      (Section 5.1's normal case).
+  //   2. Sentence-level fallback: if line counts don't match, re-split both
+  //      sides by sentence-ending punctuation (per-language; some languages,
+  //      e.g. Thai, don't support this and skip straight to step 3) and
+  //      match sentence-for-sentence instead.
+  //   3. Warning fallback: if that still doesn't line up, the translation is
+  //      shown as-is (unstyled, nothing dropped) with a warning scoped to
+  //      this block and this language only.
   // ---------------------------------------------------------------------
-  function flattenLangLines(contentRows, code) {
-    const lines = [];
-    contentRows.forEach(function (row) {
-      const cellText = row.cells[code];
-      String(cellText == null ? '' : cellText).replace(/\r\n?/g, '\n').split('\n').forEach(function (l) {
-        lines.push(l);
-      });
-    });
-    return lines;
+  const EN_SENTENCE_TERMINATORS = ['.', '!', '?'];
+
+  function escapeRegexChar(ch) {
+    return ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  function countRealSegments(blocks) {
-    let count = 0;
-    blocks.forEach(function (block) {
-      if (block.type !== 'text' || !blockHasContent(block)) return;
-      block.segments.forEach(function (seg) {
-        if (!segmentIsMediaOnly(groupRuns(seg))) count++;
-      });
-    });
-    return count;
+  // Splits text into sentences on runs of the given terminator characters.
+  // Returns [{ text, start, end }] (offsets into the original, untrimmed
+  // text) in order, or null if no terminators are configured for this
+  // language (sentence-level matching isn't supported for it).
+  function splitSentencesWithOffsets(text, terminators) {
+    if (!terminators || terminators.length === 0) return null;
+    const cls = terminators.map(escapeRegexChar).join('');
+    const re = new RegExp('[^' + cls + ']*[' + cls + ']+', 'g');
+    const result = [];
+    let m;
+    let lastEnd = 0;
+    while ((m = re.exec(text)) !== null) {
+      if (m[0].trim() !== '') result.push({ text: m[0].trim(), start: m.index, end: re.lastIndex });
+      lastEnd = re.lastIndex;
+    }
+    const restRaw = text.slice(lastEnd);
+    if (restRaw.trim() !== '') result.push({ text: restRaw.trim(), start: lastEnd, end: text.length });
+    return result;
   }
 
-  // Renders one EN block against the shared global line cursor. Returns
-  // { html, nextCursor }.
-  function buildTranslatedTextBlockGlobal(block, allLines, startCursor, blockIndex, warnings, langCode) {
+  // Flattens a block's real (non-media-only) EN segments into one
+  // concatenated text plus a list of styled atoms with their offsets in
+  // that text, so a sentence's styling can be looked up by character range
+  // once the block is re-split at sentence granularity.
+  function buildEnAtoms(realSegments) {
+    const atoms = [];
+    let text = '';
+    realSegments.forEach(function (seg) {
+      groupRuns(seg).forEach(function (g) {
+        if (g.type !== 'text' || g.text === '') return;
+        atoms.push({ tags: g.tags, start: text.length, end: text.length + g.text.length });
+        text += g.text;
+      });
+    });
+    return { text: text, atoms: atoms };
+  }
+
+  function tagsForRange(atoms, start, end) {
+    let best = null;
+    let bestOverlap = -1;
+    atoms.forEach(function (a) {
+      const overlap = Math.min(end, a.end) - Math.max(start, a.start);
+      if (overlap > bestOverlap) { bestOverlap = overlap; best = a; }
+    });
+    return best ? best.tags : [];
+  }
+
+  // Media-only segments strictly before the first / after the last real
+  // segment render inline as before; any interspersed mid-block (rare, and
+  // only reachable once line-level matching has already failed) are folded
+  // into the trailing group rather than lost.
+  function leadAndTrailMediaHtml(enGroupsPerSeg, mediaOnly, langCode) {
+    let firstReal = -1, lastReal = -1;
+    mediaOnly.forEach(function (isMedia, i) {
+      if (!isMedia) { if (firstReal === -1) firstReal = i; lastReal = i; }
+    });
+    if (firstReal === -1) return { lead: '', trail: '' };
+    let lead = '';
+    for (let i = 0; i < firstReal; i++) {
+      if (mediaOnly[i]) lead += enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
+    }
+    let trail = '';
+    for (let i = lastReal + 1; i < mediaOnly.length; i++) {
+      if (mediaOnly[i]) trail += enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
+    }
+    for (let i = firstReal + 1; i < lastReal; i++) {
+      if (mediaOnly[i]) trail += enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
+    }
+    return { lead: lead, trail: trail };
+  }
+
+  function wrapBlockHtml(block, inner) {
+    if (!block.tag) return inner;
+    const attrs = block.attrs ? ' ' + block.attrs : '';
+    return '<' + block.tag + attrs + '>' + inner + '</' + block.tag + '>';
+  }
+
+  function buildTranslatedTextBlock(block, cellText, blockIndex, warnings, langCode, langTerminators) {
     const enSegments = block.segments;
     const enGroupsPerSeg = enSegments.map(groupRuns);
     const mediaOnly = enGroupsPerSeg.map(segmentIsMediaOnly);
+    const realIdx = [];
+    enSegments.forEach(function (_, i) { if (!mediaOnly[i]) realIdx.push(i); });
 
-    const outSegs = [];
-    let cursor = startCursor;
-    for (let i = 0; i < enSegments.length; i++) {
-      if (mediaOnly[i]) {
-        outSegs.push(enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join(''));
-        continue;
-      }
-      if (cursor >= allLines.length) {
-        warnings.push({ message: formatSegmentWarning({ type: 'ran-out-of-lines' }, blockIndex, i) });
-        outSegs.push(reconstructSegmentHtml(enGroupsPerSeg[i], langCode));
-        continue;
-      }
-      const trText = allLines[cursor];
-      cursor++;
-      const result = buildTranslatedSegmentHtml(enSegments[i], trText, langCode);
-      result.warnings.forEach(function (w) {
-        warnings.push({ message: formatSegmentWarning(w, blockIndex, i) });
+    const rawLines = String(cellText == null ? '' : cellText).replace(/\r\n?/g, '\n').split('\n');
+
+    // Tier 1: line-level match.
+    if (rawLines.length === realIdx.length) {
+      const outSegs = new Array(enSegments.length);
+      realIdx.forEach(function (segI, k) {
+        const result = buildTranslatedSegmentHtml(enSegments[segI], rawLines[k], langCode);
+        result.warnings.forEach(function (w) {
+          warnings.push({ message: formatSegmentWarning(w, blockIndex, segI) });
+        });
+        outSegs[segI] = result.html;
       });
-      outSegs.push(result.html);
+      enSegments.forEach(function (_, i) {
+        if (mediaOnly[i]) outSegs[i] = enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
+      });
+      return wrapBlockHtml(block, outSegs.join('<br>'));
     }
 
-    const innerHtml = outSegs.join('<br>');
-    const html = block.tag
-      ? '<' + block.tag + (block.attrs ? ' ' + block.attrs : '') + '>' + innerHtml + '</' + block.tag + '>'
-      : innerHtml;
-    return { html: html, nextCursor: cursor };
+    // Tier 2: sentence-level fallback (skipped for languages without
+    // reliable sentence-final punctuation, e.g. Thai).
+    if (langTerminators && langTerminators.length > 0 && realIdx.length > 0) {
+      const realSegs = realIdx.map(function (i) { return enSegments[i]; });
+      const enInfo = buildEnAtoms(realSegs);
+      const enSentences = splitSentencesWithOffsets(enInfo.text, EN_SENTENCE_TERMINATORS);
+      const targetFullText = rawLines.join(' ');
+      const targetSentences = splitSentencesWithOffsets(targetFullText, langTerminators);
+      if (enSentences && targetSentences && enSentences.length === targetSentences.length && enSentences.length > 0) {
+        let html = '';
+        for (let i = 0; i < enSentences.length; i++) {
+          const tags = tagsForRange(enInfo.atoms, enSentences[i].start, enSentences[i].end);
+          html += (i > 0 ? ' ' : '') + wrapTags(tags, escapeHtml(targetSentences[i].text));
+        }
+        warnings.push({
+          message: 'Block ' + (blockIndex + 1) + ': line count did not match for this language (EN ' + realIdx.length +
+            ' line(s), translation ' + rawLines.length + ' line(s)); matched ' + enSentences.length +
+            ' sentence(s) instead. Original line breaks are not preserved for this block in this language — please verify.'
+        });
+        const media = leadAndTrailMediaHtml(enGroupsPerSeg, mediaOnly, langCode);
+        return wrapBlockHtml(block, media.lead + html + media.trail);
+      }
+    }
+
+    // Tier 3: warning fallback — never drop translator content or guess
+    // styling; show the translation as-is and flag it for manual review.
+    const sentenceNote = (langTerminators && langTerminators.length > 0)
+      ? '; sentence-level matching also failed'
+      : '; sentence-level matching is not supported for this language';
+    warnings.push({
+      message: 'Block ' + (blockIndex + 1) + ': could not match EN structure for this language (EN has ' + realIdx.length +
+        ' line(s), translation has ' + rawLines.length + ' line(s)' + sentenceNote +
+        ') — shown unstyled, please review and style manually.'
+    });
+    const media = leadAndTrailMediaHtml(enGroupsPerSeg, mediaOnly, langCode);
+    const plainHtml = rawLines.map(escapeHtml).join('<br>');
+    return wrapBlockHtml(block, media.lead + plainHtml + media.trail);
   }
 
   // ---------------------------------------------------------------------
@@ -581,22 +677,11 @@
   // ---------------------------------------------------------------------
   // Per-language assembly
   // ---------------------------------------------------------------------
-  function generateLanguageOutput(blocks, contentRows, code, name) {
+  function generateLanguageOutput(blocks, contentRows, code, name, langTerminators) {
     const warnings = [];
-    const allLines = flattenLangLines(contentRows, code);
-    const totalReal = countRealSegments(blocks);
-
-    if (allLines.length !== totalReal) {
-      warnings.push({
-        message: 'Total translatable line count mismatch: the EN sourcecode has ' + totalReal +
-          ' line(s) to translate (excluding image/video-only lines), but this language\'s Excel rows have ' +
-          allLines.length + ' line(s) in total across all rows — line-by-line matching may be misaligned ' +
-          'from wherever the counts first diverge. Check the translator\'s line breaks against the EN source.'
-      });
-    }
-
-    let cursor = 0;
+    let rowCursor = 0;
     const parts = [];
+
     for (let bi = 0; bi < blocks.length; bi++) {
       const block = blocks[bi];
       if (block.type === 'media') {
@@ -607,15 +692,20 @@
         parts.push(reconstructEnBlockHtml(block, code));
         continue;
       }
+      if (rowCursor >= contentRows.length) {
+        warnings.push({ message: 'Block ' + (bi + 1) + ': ran out of Excel content rows to match — EN text used as a placeholder, please review.' });
+        parts.push(reconstructEnBlockHtml(block, code));
+        continue;
+      }
+      const row = contentRows[rowCursor++];
+      const cellText = row.cells[code];
       const blockWarnings = [];
-      const result = buildTranslatedTextBlockGlobal(block, allLines, cursor, bi, blockWarnings, code);
-      cursor = result.nextCursor;
-      parts.push(result.html);
+      parts.push(buildTranslatedTextBlock(block, cellText, bi, blockWarnings, code, langTerminators));
       blockWarnings.forEach(function (w) { warnings.push(w); });
     }
 
-    if (cursor < allLines.length) {
-      warnings.push({ message: 'Note: ' + (allLines.length - cursor) + ' extra translated line(s) across the Excel rows were not used.' });
+    if (rowCursor < contentRows.length) {
+      warnings.push({ message: 'Note: ' + (contentRows.length - rowCursor) + ' extra Excel row(s) below the last block were not used (more rows than blocks in the EN sourcecode).' });
     }
 
     return { code: code, name: name, html: parts.join(''), warnings: warnings };
@@ -843,7 +933,7 @@
       if (!foundCodes.has(lang.code)) {
         return { code: lang.code, name: lang.name, error: 'Language column for ' + lang.name + ' (' + lang.code + ') was not found in sheet "' + sheetName + '".' };
       }
-      return generateLanguageOutput(blocks, contentRows, lang.code, lang.name);
+      return generateLanguageOutput(blocks, contentRows, lang.code, lang.name, lang.sentence_terminators);
     });
 
     renderOutputs(results);
