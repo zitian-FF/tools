@@ -700,12 +700,22 @@
       const row = contentRows[rowCursor++];
       const cellText = row.cells[code];
       const blockWarnings = [];
-      parts.push(buildTranslatedTextBlock(block, cellText, bi, blockWarnings, code, langTerminators));
-      blockWarnings.forEach(function (w) { warnings.push(w); });
+      // A failure inside one block's matching (an unexpected exception, not
+      // just an ordinary tier-1/2 mismatch, which buildTranslatedTextBlock
+      // already handles via its own warning fallback) must never abort the
+      // rest of this language's output. Degrade just this block to the raw
+      // EN text and keep going.
+      try {
+        parts.push(buildTranslatedTextBlock(block, cellText, bi, blockWarnings, code, langTerminators));
+        blockWarnings.forEach(function (w) { warnings.push(w); });
+      } catch (err) {
+        warnings.push({ message: 'Block ' + (bi + 1) + ': an unexpected error occurred while matching this block (' + err.message + ') — EN text used as a placeholder, please review.' });
+        parts.push(reconstructEnBlockHtml(block, code));
+      }
     }
 
     if (rowCursor < contentRows.length) {
-      warnings.push({ message: 'Note: ' + (contentRows.length - rowCursor) + ' extra Excel row(s) below the last block were not used (more rows than blocks in the EN sourcecode).' });
+      warnings.push({ message: 'Note: ' + (contentRows.length - rowCursor) + ' extra Excel row(s) below the last block were not used. This usually means the EN sourcecode has fewer separate blocks (paragraphs) than the Excel sheet has content rows — e.g. two sections that should be separate <p> paragraphs got merged into one. Check for missing paragraph breaks in the EN paste; the row-to-block matching cannot recover them automatically.' });
     }
 
     return { code: code, name: name, html: parts.join(''), warnings: warnings };
