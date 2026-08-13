@@ -393,6 +393,15 @@
     const groups = groupRuns(enSegment);
 
     if (groups.length === 0) {
+      // EN has nothing here (e.g. a blank line from "\n\n"). If the matched
+      // translated line is also blank this is expected and produces nothing;
+      // but if it actually has content, that content must never be silently
+      // discarded — emit it plainly and flag it, since we can't know what
+      // (if any) styling should apply to a run EN never had.
+      if (translatedText.trim() !== '') {
+        warnings.push({ type: 'unexpected-text-in-blank-segment' });
+        return { html: escapeHtml(translatedText), warnings: warnings };
+      }
       return { html: '', warnings: warnings };
     }
 
@@ -442,7 +451,23 @@
     if (w.type === 'inline-media-approx') {
       return loc + ': image/video sits between two separate runs of text mid-sentence — placed after the translated text rather than in its exact original spot; please verify placement.';
     }
+    if (w.type === 'unexpected-text-in-blank-segment') {
+      return loc + ': EN has a blank line here but the translation has text — kept as plain unstyled text; please check this is aligned to the right line.';
+    }
     return loc + ': could not be automatically resolved — please review manually.';
+  }
+
+  // A text block (e.g. a stray "<p></p>" from copy/paste) that has no real
+  // text and no media anywhere in it has nothing for a translator to have
+  // ever seen or typed a line for — it must not consume an Excel row (that
+  // would push every later block onto the wrong row). It's reproduced as-is
+  // for every language instead.
+  function blockHasContent(block) {
+    return block.segments.some(function (seg) {
+      return groupRuns(seg).some(function (g) {
+        return g.type === 'media' || (g.type === 'text' && g.text.trim() !== '');
+      });
+    });
   }
 
   function reconstructEnBlockHtml(block, langCode) {
@@ -537,6 +562,10 @@
       const block = blocks[bi];
       if (block.type === 'media') {
         parts.push(rewriteMediaHtml(block.html, code));
+        continue;
+      }
+      if (!blockHasContent(block)) {
+        parts.push(reconstructEnBlockHtml(block, code));
         continue;
       }
       if (rowCursor >= contentRows.length) {
