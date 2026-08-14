@@ -1,998 +1,580 @@
-(function () {
-  'use strict';
+// wiki14 — client-side pipeline
+//
+// Mirrors the algorithm validated by hand against a real wiki page:
+//   1. Flatten EN sourcecode (DOM walk, <br> -> \n) and diff against the
+//      EN Excel column (rows joined by single \n) to confirm alignment
+//      and to identify + exclude metadata rows.
+//   2. Split the flattened EN text into paragraphs (\n\n) and record which
+//      style wraps each paragraph (and where images/links sit).
+//   3. For each target language: flatten + split the same way.
+//      - Paragraph count matches EN -> apply the style map directly.
+//      - Paragraph count doesn't match -> ask the Gemini proxy to resolve
+//        paragraph-range boundaries per styled section.
+//   4. Reassemble HTML, merging consecutive same-style paragraphs into a
+//      single continuous tag (matching how the EN source itself is written).
+//
+// Known limitation (unchanged from the manual process): this only handles
+// styling that is uniform across whole paragraphs / paragraph ranges. Genuine
+// mid-sentence (sub-phrase) styling isn't handled by this tool yet — if you
+// hit that on a real page, treat it as a signal to extend this, not to trust
+// a silent guess.
 
-  // ---------------------------------------------------------------------
-  // Fallback copy of data/language-lookup.json, used only if the fetch of
-  // the real file fails (e.g. when the page is opened via file:// during
-  // local testing). On GitHub Pages the fetch always succeeds and this is
-  // never used, so data/language-lookup.json remains the single source of
-  // truth.
-  // ---------------------------------------------------------------------
-  const EMBEDDED_LOOKUP_FALLBACK = {
-    "ignored_languages": [
-      { "name": "Chinese (Simplified)", "mutations": ["CN", "简体", "简体中文"] }
-    ],
-    "languages": [
-      { "name": "English", "code": "EN", "mutations": ["EN", "English"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Chinese (Traditional)", "code": "TW", "mutations": ["TW", "zh_TW", "繁體中文", "繁體", "繁体中文"], "sentence_terminators": ["。", "！", "？"] },
-      { "name": "Korean", "code": "KR", "mutations": ["KR", "ko", "KO", "한국어"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Japanese", "code": "JP", "mutations": ["JP", "ja", "jp", "日本語"], "sentence_terminators": ["。", "！", "？"] },
-      { "name": "Arabic", "code": "AR", "mutations": ["AR", "ar", "Arab", "AH", "العربية"], "sentence_terminators": [".", "!", "؟"] },
-      { "name": "German", "code": "DE", "mutations": ["DE", "de", "DH", "Deutsch"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Spanish", "code": "ES", "mutations": ["ES", "es", "ESP", "esp", "Español"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "French", "code": "FR", "mutations": ["FR", "fr", "Français"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Indonesian", "code": "ID", "mutations": ["ID", "id", "IN", "Bahasa Indonesia"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Italian", "code": "IT", "mutations": ["IT", "it", "Italiano"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Portuguese", "code": "PT", "mutations": ["PT", "PTG", "Português"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Thai", "code": "TH", "mutations": ["TH", "th", "ภาษาไทย"], "sentence_terminators": [], "sentence_splitting_supported": false },
-      { "name": "Turkish", "code": "TR", "mutations": ["TR", "tr", "TRK", "Türkçe"], "sentence_terminators": [".", "!", "?"] },
-      { "name": "Vietnamese", "code": "VN", "mutations": ["VN", "vi", "VET", "VIET", "Tiếng Việt"], "sentence_terminators": [".", "!", "?"] }
-    ]
-  };
+const CONFIG = {
+  workerUrl: "https://wiki14-gemini-proxy.tianz-88.workers.dev", // TODO: set to your deployed Worker URL
+  appToken: "bf978s39fh9wh9873grg2987gr9723", // TODO: must match the Worker's APP_TOKEN secret
+};
 
-  // ---------------------------------------------------------------------
-  // State
-  // ---------------------------------------------------------------------
-  const state = {
-    lookup: null,
-    lookupIndex: null,
-    targetLanguages: null,
-    workbook: null,
-    fileName: ''
-  };
+let LANGUAGE_LOOKUP = null;
 
-  const els = {};
+async function loadLanguageLookup() {
+  if (LANGUAGE_LOOKUP) return LANGUAGE_LOOKUP;
+  const resp = await fetch("language-lookup.json");
+  LANGUAGE_LOOKUP = await resp.json();
+  return LANGUAGE_LOOKUP;
+}
 
-  // ---------------------------------------------------------------------
-  // Language lookup helpers
-  // ---------------------------------------------------------------------
-  function normalizeHeaderKey(s) {
-    return String(s == null ? '' : s).trim().toLowerCase();
+function buildMutationMap(lookup) {
+  const map = new Map();
+  for (const lang of lookup.languages) {
+    for (const m of lang.mutations) map.set(m, lang.code);
+  }
+  return map;
+}
+
+// ---------- Step 1: DOM walk -> token stream ----------
+
+function tokenizeSourcecode(html) {
+  const doc = new DOMParser().parseFromString(`<div id="root">${html}</div>`, "text/html");
+  const root = doc.getElementById("root");
+  const tokens = [];
+
+  function styleKeyFor(stack) {
+    return stack
+      .map((s) => (s.attr ? `${s.tag}[${s.attr}]` : s.tag))
+      .join(">");
+  }
+  function openTagsFor(stack) {
+    return stack.map((s) => s.openTag).join("");
+  }
+  function closeTagsFor(stack) {
+    return [...stack].reverse().map((s) => s.closeTag).join("");
   }
 
-  function buildLookupIndex(lookup) {
-    const map = new Map();
-    lookup.languages.forEach(function (lang) {
-      lang.mutations.forEach(function (m) {
-        const key = normalizeHeaderKey(m);
-        if (key && !map.has(key)) map.set(key, { type: 'lang', code: lang.code, name: lang.name });
-      });
-    });
-    (lookup.ignored_languages || []).forEach(function (lang) {
-      lang.mutations.forEach(function (m) {
-        const key = normalizeHeaderKey(m);
-        if (key && !map.has(key)) map.set(key, { type: 'ignored', name: lang.name });
-      });
-    });
-    return map;
-  }
-
-  async function loadLookup() {
-    try {
-      const res = await fetch('data/language-lookup.json');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return await res.json();
-    } catch (e) {
-      console.warn('Falling back to embedded language lookup (fetch failed):', e);
-      return EMBEDDED_LOOKUP_FALLBACK;
-    }
-  }
-
-  // ---------------------------------------------------------------------
-  // Excel parsing: header row + column detection, content row extraction
-  // ---------------------------------------------------------------------
-  function detectHeaderRow(matrix, lookupIndex) {
-    const maxScan = Math.min(matrix.length, 10);
-    let best = { rowIdx: -1, score: 0 };
-    for (let r = 0; r < maxScan; r++) {
-      const row = matrix[r] || [];
-      let score = 0;
-      row.forEach(function (cell) {
-        const key = normalizeHeaderKey(cell);
-        if (key && lookupIndex.has(key)) score++;
-      });
-      if (score > best.score) best = { rowIdx: r, score: score };
-    }
-    return best.score >= 3 ? best.rowIdx : -1;
-  }
-
-  function buildColumnMap(matrix, headerRowIdx, lookupIndex) {
-    const headerRow = matrix[headerRowIdx] || [];
-    return headerRow.map(function (cell) {
-      const key = normalizeHeaderKey(cell);
-      const hit = lookupIndex.get(key);
-      return hit ? hit : { type: 'other' };
-    });
-  }
-
-  function extractContentRows(matrix, headerRowIdx, columnMap) {
-    const langCols = [];
-    columnMap.forEach(function (c, idx) {
-      if (c.type === 'lang') langCols.push(idx);
-    });
-    // Column A (the non-language "Language" label column in the sample sheet)
-    // carries a value only on metadata rows (Checker, Proofread check, ...);
-    // content rows leave it empty. A blank language cell on such a row (e.g.
-    // no checker assigned yet) is metadata, not a translation gap, so this
-    // must be checked before — not in place of — real content detection.
-    // Only trust this signal when column A isn't itself a language column.
-    const colAIsLabel = columnMap[0] && columnMap[0].type !== 'lang';
-    const rows = [];
-    for (let r = headerRowIdx + 1; r < matrix.length; r++) {
-      const row = matrix[r] || [];
-      const isMeta = colAIsLabel && String(row[0] || '').trim() !== '';
-      if (isMeta) continue;
-      const anyLangContent = langCols.some(function (i) { return String(row[i] || '').trim() !== ''; });
-      if (!anyLangContent) continue;
-      const cells = {};
-      langCols.forEach(function (i) {
-        cells[columnMap[i].code] = String(row[i] !== undefined ? row[i] : '');
-      });
-      rows.push({ rowIndex: r, cells: cells });
-    }
-    return rows;
-  }
-
-  // ---------------------------------------------------------------------
-  // EN sourcecode parsing: top-level blocks -> <br>-bounded segments
-  // ---------------------------------------------------------------------
-  function getAttrString(el) {
-    return Array.prototype.map.call(el.attributes, function (a) {
-      return a.name + '="' + String(a.value).replace(/"/g, '&quot;') + '"';
-    }).join(' ');
-  }
-
-  function isMediaOnlyElement(node) {
-    const tag = node.tagName.toLowerCase();
-    if (tag === 'img' || tag === 'video') return true;
-    let hasOtherContent = false;
-    Array.prototype.forEach.call(node.childNodes, function (c) {
-      if (c.nodeType === Node.TEXT_NODE) {
-        if (c.textContent.trim() !== '') hasOtherContent = true;
-      } else if (c.nodeType === Node.ELEMENT_NODE) {
-        const t = c.tagName.toLowerCase();
-        if (t !== 'img' && t !== 'video') hasOtherContent = true;
-      }
-    });
-    if (hasOtherContent) return false;
-    return !!(node.querySelector && node.querySelector('img, video'));
-  }
-
-  function extractSegments(rootNode) {
-    const segments = [];
-    let current = [];
-    function pushBreak() {
-      segments.push(current);
-      current = [];
-    }
-    function walk(node, tagStack) {
-      Array.prototype.forEach.call(node.childNodes, function (child) {
-        if (child.nodeType === Node.TEXT_NODE) {
-          if (child.textContent !== '') {
-            current.push({ type: 'text', text: child.textContent, tags: tagStack.slice() });
-          }
-          return;
-        }
-        if (child.nodeType !== Node.ELEMENT_NODE) return;
+  function walk(node, stack, linkHref) {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = child.textContent;
+        if (text.length === 0) continue;
+        tokens.push({
+          type: "text",
+          text,
+          styleKey: styleKeyFor(stack),
+          openTag: openTagsFor(stack),
+          closeTag: closeTagsFor(stack),
+          linkHref: linkHref || null,
+        });
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
         const tag = child.tagName.toLowerCase();
-        if (tag === 'br') {
-          pushBreak();
-          return;
+        if (tag === "br") {
+          tokens.push({ type: "br" });
+        } else if (tag === "img" || tag === "video") {
+          tokens.push({
+            type: "media",
+            tag,
+            src: child.getAttribute("src") || "",
+            outerHTML: child.outerHTML,
+          });
+        } else if (tag === "p" || tag === "div") {
+          // Special-case: a div/p whose only element child is a single
+          // img/video (the common "image block" wrapper, e.g.
+          // `<div style="text-align:left"><img .../></div>`) becomes one
+          // media token carrying the whole wrapper's outerHTML, rather
+          // than being walked as a structural block.
+          const elementChildren = [...child.children];
+          const isImageWrapper =
+            tag === "div" &&
+            elementChildren.length === 1 &&
+            (elementChildren[0].tagName === "IMG" || elementChildren[0].tagName === "VIDEO");
+          if (isImageWrapper) {
+            tokens.push({
+              type: "media",
+              tag: elementChildren[0].tagName.toLowerCase(),
+              src: elementChildren[0].getAttribute("src") || "",
+              outerHTML: child.outerHTML,
+            });
+          } else {
+            tokens.push({ type: "block" });
+            walk(child, stack, linkHref);
+            tokens.push({ type: "block" });
+          }
+        } else if (tag === "a") {
+          walk(child, stack, child.getAttribute("href") || "");
+        } else if (tag === "span") {
+          const style = child.getAttribute("style") || "";
+          const entry = { tag: "span", attr: style, openTag: `<span style="${style}">`, closeTag: "</span>" };
+          walk(child, [...stack, entry], linkHref);
+        } else if (tag === "strong" || tag === "s" || tag === "em" || tag === "u") {
+          const entry = { tag, attr: null, openTag: `<${tag}>`, closeTag: `</${tag}>` };
+          walk(child, [...stack, entry], linkHref);
+        } else {
+          // Unknown tag: descend without adding to the style stack, so we
+          // don't silently lose its contents.
+          walk(child, stack, linkHref);
         }
-        if (tag === 'img' || tag === 'video') {
-          current.push({ type: 'media', html: child.outerHTML, tags: tagStack.slice() });
-          return;
-        }
-        const tagInfo = { tag: tag, attrs: getAttrString(child) };
-        walk(child, tagStack.concat([tagInfo]));
-      });
+      }
     }
-    walk(rootNode, []);
-    segments.push(current);
-    return segments;
   }
 
-  function parseBlocks(html) {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const body = doc.body;
-    if (!body) throw new Error('Could not parse sourcecode as HTML.');
-    const blocks = [];
-    Array.prototype.forEach.call(body.childNodes, function (node) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        if (node.textContent.trim() === '') return;
-        blocks.push({ type: 'text', tag: null, attrs: '', segments: [[{ type: 'text', text: node.textContent, tags: [] }]] });
-        return;
-      }
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
-      if (isMediaOnlyElement(node)) {
-        blocks.push({ type: 'media', html: node.outerHTML });
-        return;
-      }
-      blocks.push({
-        type: 'text',
-        tag: node.tagName.toLowerCase(),
-        attrs: getAttrString(node),
-        segments: extractSegments(node)
+  walk(root, [], null);
+  return tokens;
+}
+
+// ---------- Step 2: token stream -> flattened text + paragraph/style structure ----------
+
+function flattenTokens(tokens) {
+  // Plain text only, <br> -> \n. Used purely for the diff-against-Excel check.
+  return tokens
+    .map((t) => {
+      if (t.type === "text") return t.text;
+      if (t.type === "br") return "\n";
+      return "";
+    })
+    .join("");
+}
+
+function buildStructure(tokens) {
+  const paragraphs = []; // array of lines; each line = array of {text, styleKey, openTag, closeTag, linkHref}
+  const mediaInsertions = []; // {beforeParagraphIndex, outerHTML, src}
+  let currentParagraph = [];
+  let currentLine = [];
+  let brCount = 0;
+
+  function flushLine() {
+    if (currentLine.length > 0) {
+      currentParagraph.push(currentLine);
+      currentLine = [];
+    }
+  }
+  function flushParagraph() {
+    flushLine();
+    if (currentParagraph.length > 0) {
+      paragraphs.push(currentParagraph);
+      currentParagraph = [];
+    }
+  }
+
+  for (const tok of tokens) {
+    if (tok.type === "text") {
+      brCount = 0;
+      currentLine.push(tok);
+    } else if (tok.type === "br") {
+      flushLine();
+      brCount++;
+      if (brCount === 2) flushParagraph();
+    } else if (tok.type === "media") {
+      flushParagraph();
+      mediaInsertions.push({
+        beforeParagraphIndex: paragraphs.length,
+        outerHTML: tok.outerHTML,
+        src: tok.src,
+        tag: tok.tag,
       });
-    });
+      brCount = 0;
+    } else if (tok.type === "block") {
+      flushParagraph();
+      brCount = 0;
+    }
+  }
+  flushParagraph();
+
+  // Drop whitespace-only paragraphs. Empty <p></p> tags never produce
+  // tokens in the first place (nothing to filter), but stray whitespace
+  // text nodes outside any real tag (e.g. a trailing newline at the end of
+  // a pasted/saved HTML file) do produce a spurious trailing "paragraph".
+  // Remap mediaInsertions' indices to account for any removed paragraphs.
+  const keepFlags = paragraphs.map((p) => paragraphPlainText(p).trim().length > 0);
+  const remap = [];
+  let kept = 0;
+  for (let i = 0; i < paragraphs.length; i++) {
+    remap.push(kept);
+    if (keepFlags[i]) kept++;
+  }
+  const filteredParagraphs = paragraphs.filter((_, i) => keepFlags[i]);
+  const remappedMedia = mediaInsertions.map((m) => ({
+    ...m,
+    beforeParagraphIndex: remap[m.beforeParagraphIndex] ?? filteredParagraphs.length,
+  }));
+
+  return { paragraphs: filteredParagraphs, mediaInsertions: remappedMedia };
+}
+
+// Per-paragraph style: the styleKey shared by every line/run in that
+// paragraph, if uniform; otherwise null (mixed / mid-sentence styling,
+// which this tool doesn't attempt to auto-resolve).
+function paragraphStyleKeys(paragraphs) {
+  return paragraphs.map((lines) => {
+    const keys = new Set();
+    let sample = null;
+    for (const line of lines) {
+      for (const run of line) {
+        keys.add(run.styleKey);
+        if (!sample) sample = run;
+      }
+    }
+    if (keys.size === 1) return { uniform: true, styleKey: sample.styleKey, openTag: sample.openTag, closeTag: sample.closeTag };
+    return { uniform: false, styleKey: null };
+  });
+}
+
+// Collapse consecutive paragraphs sharing the same styleKey into runs, e.g.
+// paragraphs [3,4,5] all "red" become one run {styleKey:"red", start:3, end:5}.
+function collapseStyleRuns(paraStyles) {
+  const runs = [];
+  let i = 0;
+  while (i < paraStyles.length) {
+    const cur = paraStyles[i];
+    let j = i;
+    while (j + 1 < paraStyles.length && paraStyles[j + 1].styleKey === cur.styleKey && cur.uniform) {
+      j++;
+    }
+    runs.push({ styleKey: cur.styleKey, openTag: cur.openTag, closeTag: cur.closeTag, start: i, end: j });
+    i = j + 1;
+  }
+  return runs;
+}
+
+function paragraphPlainText(lines) {
+  return lines.map((line) => line.map((r) => r.text).join("")).join("\n");
+}
+
+// ---------- Excel handling ----------
+
+function readWorkbook(arrayBuffer) {
+  return XLSX.read(arrayBuffer, { type: "array" });
+}
+
+function sheetToRows(sheet) {
+  return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+}
+
+function findEnColumn(headerRow) {
+  for (let i = 0; i < headerRow.length; i++) {
+    const h = String(headerRow[i]).trim();
+    if (h === "EN" || h.toLowerCase() === "english") return i;
+  }
+  return -1;
+}
+
+function normalizeForMatch(s) {
+  // Strip typographic quote marks and collapse whitespace before checking
+  // containment. Real sourcecode sometimes has decorative curly quotes
+  // around a heading that were never copied into the Excel's plain text
+  // (cosmetic, added directly by whoever styled the EN version) — that
+  // shouldn't cause a real content row to be misclassified as metadata.
+  return s.replace(/[“”"'‘’]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
+  // A row is "content" if its EN cell text appears (after normalization)
+  // inside the flattened sourcecode text. This naturally excludes checker
+  // names, proofread checkboxes, and blank rows without needing to know
+  // the sheet's specific column layout.
+  const normalizedFlat = normalizeForMatch(enFlatFromSourcecode);
+  const contentRowIndices = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cell = rows[r][enColIdx];
+    if (typeof cell !== "string" || cell.trim().length === 0) continue;
+    if (normalizedFlat.includes(normalizeForMatch(cell))) {
+      contentRowIndices.push(r);
+    }
+  }
+  return contentRowIndices;
+}
+
+// ---------- Gemini fallback ----------
+
+async function resolveViaGemini(styleRuns, targetParagraphTexts) {
+  const resp = await fetch(CONFIG.workerUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-app-token": CONFIG.appToken,
+    },
+    body: JSON.stringify({
+      style_runs: styleRuns.map((r) => ({
+        style: r.styleKey,
+        start: r.start,
+        end: r.end,
+      })),
+      target_paragraphs: targetParagraphTexts,
+    }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Gemini proxy request failed: ${resp.status}`);
+  }
+  return resp.json(); // { matches: [{style, start, end, confidence}, ...] }
+}
+
+// ---------- Assembly ----------
+
+function escapeHtml(text) {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function linkify(text, enLinks) {
+  let out = escapeHtml(text);
+  for (const link of enLinks) {
+    if (text.includes(link.text)) {
+      const esc = escapeHtml(link.text);
+      out = out.split(esc).join(
+        `<a target="_blank" rel="noopener noreferrer nofollow" href="${link.href}">${esc}</a>`
+      );
+    }
+  }
+  return out;
+}
+
+function renderParagraphRange(paragraphTexts, start, end, openTag, closeTag, enLinks) {
+  const rendered = paragraphTexts
+    .slice(start, end + 1)
+    .map((p) => p.split("\n").map((line) => linkify(line, enLinks)).join("<br>"));
+  const inner = rendered.join("<br><br>");
+  return `${openTag}${inner}${closeTag}`;
+}
+
+async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLinks, mediaInsertions, flagsOut) {
+  const enParagraphCount = enStyleRuns.reduce((max, r) => Math.max(max, r.end), 0) + 1;
+  const directMapping = targetParagraphTexts.length === enParagraphCount;
+
+  let assignedRuns; // [{styleKey, openTag, closeTag, start, end}] in target-paragraph index space
+
+  if (directMapping) {
+    assignedRuns = enStyleRuns.map((r) => ({ ...r }));
+  } else {
+    // Ask Gemini to resolve paragraph-range boundaries by meaning. Plain
+    // (unstyled) runs don't need resolving — they're inferred as gaps below.
+    const nonPlainRuns = enStyleRuns.filter((r) => r.styleKey !== "");
+    let matches = [];
+    try {
+      const result = await resolveViaGemini(nonPlainRuns, targetParagraphTexts);
+      matches = result.matches || [];
+    } catch (e) {
+      flagsOut.push(`${code}: Gemini fallback failed (${e.message}) — all styling flagged for manual review.`);
+    }
+
+    assignedRuns = [];
+    for (const run of nonPlainRuns) {
+      const m = matches.find((x) => x.style === run.styleKey);
+      if (!m || m.confidence === "low") {
+        flagsOut.push(
+          `${code}: could not confidently place "${run.styleKey}" styling — left unstyled and flagged inline.`
+        );
+        continue;
+      }
+      assignedRuns.push({ ...run, start: m.start, end: m.end });
+    }
+  }
+
+  // Fill gaps between assigned runs with plain (unstyled) ranges, covering
+  // every target paragraph.
+  assignedRuns.sort((a, b) => a.start - b.start);
+  const segments = [];
+  let cursor = 0;
+  for (const run of assignedRuns) {
+    if (run.start > cursor) {
+      segments.push({ styleKey: "", openTag: "", closeTag: "", start: cursor, end: run.start - 1 });
+    }
+    segments.push(run);
+    cursor = run.end + 1;
+  }
+  if (cursor < targetParagraphTexts.length) {
+    segments.push({ styleKey: "", openTag: "", closeTag: "", start: cursor, end: targetParagraphTexts.length - 1 });
+  }
+
+  // Resolve each media insertion's position in TARGET paragraph space.
+  // Anchor off the EN style run whose boundary it sits on (immediately
+  // before that run starts, or immediately after it ends) — this holds up
+  // even when paragraph counts differ, because style runs are the same
+  // thing Gemini already resolved. If no run boundary anchors it (media
+  // sitting in the middle of a long plain stretch), fall back to a
+  // proportional estimate and flag it for a manual placement check.
+  const resolvedMedia = mediaInsertions.map((m) => {
+    if (directMapping) return { ...m, targetIndex: m.beforeParagraphIndex };
+
+    const afterRun = enStyleRuns.find((r) => r.end + 1 === m.beforeParagraphIndex);
+    const beforeRun = enStyleRuns.find((r) => r.start === m.beforeParagraphIndex);
+    const anchorRun = afterRun || beforeRun;
+    const assigned = anchorRun && assignedRuns.find((r) => r.styleKey === anchorRun.styleKey);
+
+    if (assigned) {
+      const targetIndex = afterRun ? assigned.end + 1 : assigned.start;
+      return { ...m, targetIndex };
+    }
+
+    flagsOut.push(`${code}: image/video position estimated (no exact style-run anchor found) — please verify placement.`);
+    const ratio = m.beforeParagraphIndex / enParagraphCount;
+    return { ...m, targetIndex: Math.round(ratio * targetParagraphTexts.length) };
+  });
+
+  // Render segments, splicing in media tags at their resolved positions.
+  // Media are block-level siblings, not inline content, so they split the
+  // surrounding text into separate <p> blocks rather than nesting inside one
+  // — this returns an ordered list of top-level blocks
+  // ({type:'p', html} | {type:'media', html}) for the caller to join.
+  let mediaCursor = 0;
+  const sortedMedia = [...resolvedMedia].sort((a, b) => a.targetIndex - b.targetIndex);
+
+  function mediaBlocksBefore(paragraphIndex) {
+    const blocks = [];
+    while (mediaCursor < sortedMedia.length && sortedMedia[mediaCursor].targetIndex <= paragraphIndex) {
+      const m = sortedMedia[mediaCursor];
+      const swappedSrc = m.src.replace("_EN.", `_${code}.`);
+      // split/join instead of replace() since src typically also appears
+      // in an alt="" attribute and both should be swapped.
+      const html = m.src ? m.outerHTML.split(m.src).join(swappedSrc) : m.outerHTML;
+      blocks.push({ type: "media", html });
+      mediaCursor++;
+    }
     return blocks;
   }
 
-  // ---------------------------------------------------------------------
-  // Styling engine
-  // ---------------------------------------------------------------------
-  function escapeHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  function tagSig(tags) {
-    return JSON.stringify(tags.map(function (t) { return t.tag + '|' + t.attrs; }));
-  }
-
-  function wrapTags(tags, inner) {
-    if (!tags.length) return inner;
-    const open = tags.map(function (t) { return '<' + t.tag + (t.attrs ? ' ' + t.attrs : '') + '>'; }).join('');
-    const close = tags.slice().reverse().map(function (t) { return '</' + t.tag + '>'; }).join('');
-    return open + inner + close;
-  }
-
-  function groupRuns(segment) {
-    const groups = [];
-    let i = 0;
-    while (i < segment.length) {
-      const run = segment[i];
-      if (run.type === 'media') {
-        groups.push({ type: 'media', html: run.html, tags: run.tags || [] });
-        i++;
-        continue;
-      }
-      const sig = tagSig(run.tags);
-      let text = run.text;
-      let j = i + 1;
-      while (j < segment.length && segment[j].type === 'text' && tagSig(segment[j].tags) === sig) {
-        text += segment[j].text;
-        j++;
-      }
-      groups.push({ type: 'text', tags: run.tags, text: text });
-      i = j;
+  const blocks = [];
+  let currentPParts = [];
+  function flushP() {
+    if (currentPParts.length > 0) {
+      blocks.push({ type: "p", html: `<p>${currentPParts.join("<br><br>")}</p>` });
+      currentPParts = [];
     }
-    return groups;
   }
 
-  // Recognized delimiter pairs: [ ], " ", ' ', ( ), 「 」, « », „ "
-  const DELIM_PATTERN = [
-    '\\[[^\\[\\]]*\\]',
-    '"[^"]*"',
-    "'[^']*'",
-    '\\([^()]*\\)',
-    '「[^「」]*」',
-    '«[^«»]*»',
-    '„[^„"]*"'
-  ].join('|');
-
-  function findDelimMatches(text) {
-    const re = new RegExp(DELIM_PATTERN, 'g');
-    const matches = [];
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      matches.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
-      if (m[0].length === 0) re.lastIndex++;
+  for (const seg of segments) {
+    const media = mediaBlocksBefore(seg.start);
+    if (media.length > 0) {
+      flushP();
+      blocks.push(...media);
     }
-    return matches;
+    currentPParts.push(renderParagraphRange(targetParagraphTexts, seg.start, seg.end, seg.openTag, seg.closeTag, enLinks));
+  }
+  flushP();
+  blocks.push(...mediaBlocksBefore(targetParagraphTexts.length)); // any trailing media
+
+  return blocks;
+}
+
+// ---------- Top-level orchestration ----------
+
+async function runPipeline(enSourcecode, workbookArrayBuffer, sheetName, onProgress) {
+  const lookup = await loadLanguageLookup();
+  const mutationMap = buildMutationMap(lookup);
+
+  const wb = readWorkbook(workbookArrayBuffer);
+  const sheet = wb.Sheets[sheetName || wb.SheetNames[0]];
+  const rows = sheetToRows(sheet);
+  const headerRow = rows[0];
+  const enColIdx = findEnColumn(headerRow);
+  if (enColIdx === -1) throw new Error("Could not find an EN column in the sheet header row.");
+
+  const tokens = tokenizeSourcecode(enSourcecode);
+  const enFlat = flattenTokens(tokens);
+
+  const contentRowIndices = identifyContentRows(rows, enColIdx, enFlat);
+  if (contentRowIndices.length === 0) {
+    throw new Error("No Excel rows matched the sourcecode — check the sheet and sourcecode are for the same page.");
   }
 
-  function computeGaps(text, matches) {
-    const gaps = [];
-    let prevEnd = 0;
-    matches.forEach(function (m) {
-      gaps.push(text.slice(prevEnd, m.start));
-      prevEnd = m.end;
-    });
-    gaps.push(text.slice(prevEnd));
-    return gaps;
+  // Validate: EN rows joined by \n should match the flattened sourcecode.
+  // We check paragraph COUNT/boundaries rather than raw character equality,
+  // because real pages can have decorative punctuation in the sourcecode
+  // (curly quotes wrapping a heading, etc.) added directly by whoever
+  // styled the EN version, which was never copied into the Excel's plain
+  // text. That's cosmetic and doesn't affect paragraph structure — but a
+  // genuine paragraph-count mismatch means something real is wrong (a
+  // metadata row miscategorized as content, sheet/sourcecode out of sync,
+  // etc.) and should stop the pipeline rather than guess past it.
+  const enRowsFlat = contentRowIndices.map((r) => String(rows[r][enColIdx])).join("\n");
+  const sourceParagraphCount = enFlat.split("\n\n").length;
+  const excelParagraphCount = enRowsFlat.split("\n\n").length;
+  if (sourceParagraphCount !== excelParagraphCount) {
+    throw new Error(
+      `Flatten-and-diff check failed: the EN sourcecode implies ${sourceParagraphCount} paragraphs but the ` +
+        `EN Excel content implies ${excelParagraphCount}. This usually means a metadata row was miscategorized ` +
+        "as content, or the sourcecode/sheet are out of sync. Not proceeding automatically — please check the two inputs match."
+    );
+  }
+  if (enRowsFlat !== enFlat) {
+    console.warn(
+      "wiki14: EN sourcecode text has minor character differences from the Excel EN column " +
+        "(often decorative punctuation not present in the sheet) — paragraph structure still lines up, proceeding."
+    );
   }
 
-  // Up to 1-3 short connector/punctuation tokens between delimited terms
-  // are allowed and dropped from styling; anything else disqualifies the
-  // span from the delimiter-anchored rule (falls through to a warning).
-  function isGlueGap(gap) {
-    const trimmed = gap.trim();
-    if (!trimmed) return true;
-    const tokens = trimmed.split(/\s+/).filter(Boolean);
-    if (tokens.length > 3) return false;
-    const glueRe = /^(and|or|&)$/i;
-    return tokens.every(function (tok) {
-      const core = tok.replace(/^[^\w]+|[^\w]+$/g, '');
-      if (core === '') return true; // pure punctuation, e.g. "," "/" "-"
-      return glueRe.test(core);
-    });
+  const { paragraphs: enParagraphs, mediaInsertions } = buildStructure(tokens);
+  const paraStyles = paragraphStyleKeys(enParagraphs);
+  const mixedParagraphs = paraStyles
+    .map((s, i) => (s.uniform ? null : i))
+    .filter((i) => i !== null);
+  if (mixedParagraphs.length > 0) {
+    throw new Error(
+      `Paragraph(s) ${mixedParagraphs.join(", ")} contain mixed styling within a single paragraph ` +
+        `(likely genuine mid-sentence / sub-phrase styling). This tool doesn't auto-resolve that case yet — ` +
+        `see the SKILL.md notes on sub-phrase matching for the manual approach.`
+    );
   }
+  const enStyleRuns = collapseStyleRuns(paraStyles);
 
-  // Whether a segment's groups carry any real (non-whitespace) text.
-  function groupsHaveRealText(groups) {
-    return groups.some(function (g) { return g.type === 'text' && g.text.trim() !== ''; });
-  }
-
-  // A segment is "media-only" when it contains at least one image/video and
-  // no real translatable text — translators never see or account for these
-  // lines, so they must not consume a slot when matching against the
-  // Excel \n-split translation (Section 4.1/5.1) and must not be dropped.
-  function segmentIsMediaOnly(groups) {
-    return groups.some(function (g) { return g.type === 'media'; }) && !groupsHaveRealText(groups);
-  }
-
-  function mediaGroupHtml(g, langCode) {
-    return wrapTags(g.tags, rewriteMediaHtml(g.html, langCode));
-  }
-
-  // Reapplies EN styling (Section 5.2/5.3) to translated text, given only
-  // the EN segment's text-bearing groups (media already stripped out by the
-  // caller). Returns { html, warnings: [{type, ...}] }
-  function styleTextGroups(textGroups, translatedText) {
-    const warnings = [];
-
-    if (textGroups.length === 0) {
-      return { html: escapeHtml(translatedText), warnings: warnings };
-    }
-
-    if (textGroups.length === 1) {
-      const g = textGroups[0];
-      return { html: wrapTags(g.tags, escapeHtml(translatedText)), warnings: warnings };
-    }
-
-    // Mixed segment: evaluate each styled (non-empty tag) group for the
-    // delimiter-anchored rule (Section 5.3).
-    const styledGroups = textGroups.filter(function (g) { return g.tags.length > 0; });
-    if (styledGroups.length === 0) {
-      return { html: escapeHtml(translatedText), warnings: warnings };
-    }
-
-    let allQualify = true;
-    const rules = [];
-    for (let i = 0; i < styledGroups.length; i++) {
-      const g = styledGroups[i];
-      const matches = findDelimMatches(g.text);
-      if (matches.length === 0) { allQualify = false; break; }
-      const gaps = computeGaps(g.text, matches);
-      if (!gaps.every(isGlueGap)) { allQualify = false; break; }
-      rules.push({ tags: g.tags, count: matches.length });
-    }
-
-    if (!allQualify) {
-      warnings.push({ type: 'unresolved-style' });
-      return { html: escapeHtml(translatedText), warnings: warnings };
-    }
-
-    const totalExpected = rules.reduce(function (s, r) { return s + r.count; }, 0);
-    const found = findDelimMatches(translatedText);
-    if (found.length !== totalExpected) {
-      warnings.push({ type: 'term-count-mismatch', enCount: totalExpected, foundCount: found.length });
-      return { html: escapeHtml(translatedText), warnings: warnings };
-    }
-
-    let html = '';
-    let cursor = 0;
-    let matchIdx = 0;
-    rules.forEach(function (rule) {
-      for (let k = 0; k < rule.count; k++) {
-        const m = found[matchIdx++];
-        html += escapeHtml(translatedText.slice(cursor, m.start));
-        html += wrapTags(rule.tags, escapeHtml(m.text));
-        cursor = m.end;
-      }
-    });
-    html += escapeHtml(translatedText.slice(cursor));
-    return { html: html, warnings: warnings };
-  }
-
-  // Builds the translated HTML for one EN segment (an array of runs) against
-  // one line of translated text. Images/videos inline within the segment are
-  // never dropped: their filenames are localized and they're re-inserted at
-  // the same relative position (before/after the translated text). Media
-  // genuinely sandwiched between two separate text runs can't be positioned
-  // exactly (translated word order differs), so it's placed after the text
-  // and flagged for a quick manual check.
-  // Returns { html, warnings: [{type, ...}] }
-  function buildTranslatedSegmentHtml(enSegment, translatedText, langCode) {
-    const warnings = [];
-    const groups = groupRuns(enSegment);
-
-    if (groups.length === 0) {
-      // EN has nothing here (e.g. a blank line from "\n\n"). If the matched
-      // translated line is also blank this is expected and produces nothing;
-      // but if it actually has content, that content must never be silently
-      // discarded — emit it plainly and flag it, since we can't know what
-      // (if any) styling should apply to a run EN never had.
-      if (translatedText.trim() !== '') {
-        warnings.push({ type: 'unexpected-text-in-blank-segment' });
-        return { html: escapeHtml(translatedText), warnings: warnings };
-      }
-      return { html: '', warnings: warnings };
-    }
-
-    const mediaGroups = groups.filter(function (g) { return g.type === 'media'; });
-    if (mediaGroups.length === 0) {
-      return styleTextGroups(groups, translatedText);
-    }
-
-    // Segment mixes media with real text. Split off leading media (before
-    // the first text run), trailing media (after the last text run), and
-    // any media stuck between two separate text runs.
-    let firstTextIdx = -1;
-    let lastTextIdx = -1;
-    groups.forEach(function (g, i) {
-      if (g.type === 'text') {
-        if (firstTextIdx === -1) firstTextIdx = i;
-        lastTextIdx = i;
-      }
-    });
-
-    const leadingMedia = groups.slice(0, firstTextIdx).filter(function (g) { return g.type === 'media'; });
-    const trailingMedia = groups.slice(lastTextIdx + 1).filter(function (g) { return g.type === 'media'; });
-    const interspersedMedia = groups.slice(firstTextIdx, lastTextIdx + 1).filter(function (g) { return g.type === 'media'; });
-
-    const textGroups = groups.filter(function (g) { return g.type === 'text'; });
-    const textResult = styleTextGroups(textGroups, translatedText);
-    textResult.warnings.forEach(function (w) { warnings.push(w); });
-
-    if (interspersedMedia.length > 0) {
-      warnings.push({ type: 'inline-media-approx' });
-    }
-
-    const leadHtml = leadingMedia.map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
-    const trailHtml = trailingMedia.concat(interspersedMedia).map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
-
-    return { html: leadHtml + textResult.html + trailHtml, warnings: warnings };
-  }
-
-  function formatSegmentWarning(w, blockIndex, segIndex) {
-    const loc = 'Block ' + (blockIndex + 1) + ', segment ' + (segIndex + 1);
-    if (w.type === 'unresolved-style') {
-      return loc + ': mid-sentence styling could not be safely auto-applied (not a whole-segment or clean bracket/quote case) — please review and style manually.';
-    }
-    if (w.type === 'term-count-mismatch') {
-      return loc + ': bracket/quote term count mismatch (EN styled span has ' + w.enCount + ', translation has ' + w.foundCount + ') — styling skipped, please review.';
-    }
-    if (w.type === 'inline-media-approx') {
-      return loc + ': image/video sits between two separate runs of text mid-sentence — placed after the translated text rather than in its exact original spot; please verify placement.';
-    }
-    if (w.type === 'unexpected-text-in-blank-segment') {
-      return loc + ': EN has a blank line here but the translation has text — kept as plain unstyled text; please check this is aligned to the right line.';
-    }
-    return loc + ': could not be automatically resolved — please review manually.';
-  }
-
-  // A text block (e.g. a stray "<p></p>" from copy/paste) that has no real
-  // text and no media anywhere in it has nothing for a translator to have
-  // ever seen or typed a line for — it must not consume a translated line
-  // (that would push every later segment in the document onto the wrong
-  // line). It's reproduced as-is for every language instead.
-  function blockHasContent(block) {
-    return block.segments.some(function (seg) {
-      return groupRuns(seg).some(function (g) {
-        return g.type === 'media' || (g.type === 'text' && g.text.trim() !== '');
-      });
-    });
-  }
-
-  function reconstructSegmentHtml(groups, langCode) {
-    return groups.map(function (g) {
-      if (g.type === 'media') return mediaGroupHtml(g, langCode);
-      return wrapTags(g.tags, escapeHtml(g.text));
-    }).join('');
-  }
-
-  function reconstructEnBlockHtml(block, langCode) {
-    const segs = block.segments.map(function (seg) { return reconstructSegmentHtml(groupRuns(seg), langCode); });
-    const inner = segs.join('<br>');
-    if (block.tag) {
-      const attrs = block.attrs ? ' ' + block.attrs : '';
-      return '<' + block.tag + attrs + '>' + inner + '</' + block.tag + '>';
-    }
-    return inner;
-  }
-
-  // ---------------------------------------------------------------------
-  // Per-block matching hierarchy
-  //
-  // Matching happens independently within each Excel row/block — never
-  // globally across the sheet. A translator merging or splitting lines
-  // differently in one block (in one language) must not throw off
-  // position-matching for any other block, in that language or any other.
-  //
-  // For each block, in order:
-  //   1. Line-level match: split the cell by "\n"; if the count equals the
-  //      EN block's translatable segment count, match position-for-position
-  //      (Section 5.1's normal case).
-  //   2. Sentence-level fallback: if line counts don't match, re-split both
-  //      sides by sentence-ending punctuation (per-language; some languages,
-  //      e.g. Thai, don't support this and skip straight to step 3) and
-  //      match sentence-for-sentence instead.
-  //   3. Warning fallback: if that still doesn't line up, the translation is
-  //      shown as-is (unstyled, nothing dropped) with a warning scoped to
-  //      this block and this language only.
-  // ---------------------------------------------------------------------
-  const EN_SENTENCE_TERMINATORS = ['.', '!', '?'];
-
-  function escapeRegexChar(ch) {
-    return ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-
-  // Splits text into sentences on runs of the given terminator characters.
-  // Returns [{ text, start, end }] (offsets into the original, untrimmed
-  // text) in order, or null if no terminators are configured for this
-  // language (sentence-level matching isn't supported for it).
-  function splitSentencesWithOffsets(text, terminators) {
-    if (!terminators || terminators.length === 0) return null;
-    const cls = terminators.map(escapeRegexChar).join('');
-    const re = new RegExp('[^' + cls + ']*[' + cls + ']+', 'g');
-    const result = [];
-    let m;
-    let lastEnd = 0;
-    while ((m = re.exec(text)) !== null) {
-      if (m[0].trim() !== '') result.push({ text: m[0].trim(), start: m.index, end: re.lastIndex });
-      lastEnd = re.lastIndex;
-    }
-    const restRaw = text.slice(lastEnd);
-    if (restRaw.trim() !== '') result.push({ text: restRaw.trim(), start: lastEnd, end: text.length });
-    return result;
-  }
-
-  // Flattens a block's real (non-media-only) EN segments into one
-  // concatenated text plus a list of styled atoms with their offsets in
-  // that text, so a sentence's styling can be looked up by character range
-  // once the block is re-split at sentence granularity.
-  function buildEnAtoms(realSegments) {
-    const atoms = [];
-    let text = '';
-    realSegments.forEach(function (seg) {
-      groupRuns(seg).forEach(function (g) {
-        if (g.type !== 'text' || g.text === '') return;
-        atoms.push({ tags: g.tags, start: text.length, end: text.length + g.text.length });
-        text += g.text;
-      });
-    });
-    return { text: text, atoms: atoms };
-  }
-
-  function tagsForRange(atoms, start, end) {
-    let best = null;
-    let bestOverlap = -1;
-    atoms.forEach(function (a) {
-      const overlap = Math.min(end, a.end) - Math.max(start, a.start);
-      if (overlap > bestOverlap) { bestOverlap = overlap; best = a; }
-    });
-    return best ? best.tags : [];
-  }
-
-  // Media-only segments strictly before the first / after the last real
-  // segment render inline as before; any interspersed mid-block (rare, and
-  // only reachable once line-level matching has already failed) are folded
-  // into the trailing group rather than lost.
-  function leadAndTrailMediaHtml(enGroupsPerSeg, mediaOnly, langCode) {
-    let firstReal = -1, lastReal = -1;
-    mediaOnly.forEach(function (isMedia, i) {
-      if (!isMedia) { if (firstReal === -1) firstReal = i; lastReal = i; }
-    });
-    if (firstReal === -1) return { lead: '', trail: '' };
-    let lead = '';
-    for (let i = 0; i < firstReal; i++) {
-      if (mediaOnly[i]) lead += enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
-    }
-    let trail = '';
-    for (let i = lastReal + 1; i < mediaOnly.length; i++) {
-      if (mediaOnly[i]) trail += enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
-    }
-    for (let i = firstReal + 1; i < lastReal; i++) {
-      if (mediaOnly[i]) trail += enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
-    }
-    return { lead: lead, trail: trail };
-  }
-
-  function wrapBlockHtml(block, inner) {
-    if (!block.tag) return inner;
-    const attrs = block.attrs ? ' ' + block.attrs : '';
-    return '<' + block.tag + attrs + '>' + inner + '</' + block.tag + '>';
-  }
-
-  function buildTranslatedTextBlock(block, cellText, blockIndex, warnings, langCode, langTerminators) {
-    const enSegments = block.segments;
-    const enGroupsPerSeg = enSegments.map(groupRuns);
-    const mediaOnly = enGroupsPerSeg.map(segmentIsMediaOnly);
-    const realIdx = [];
-    enSegments.forEach(function (_, i) { if (!mediaOnly[i]) realIdx.push(i); });
-
-    const rawLines = String(cellText == null ? '' : cellText).replace(/\r\n?/g, '\n').split('\n');
-
-    // Tier 1: line-level match.
-    if (rawLines.length === realIdx.length) {
-      const outSegs = new Array(enSegments.length);
-      realIdx.forEach(function (segI, k) {
-        const result = buildTranslatedSegmentHtml(enSegments[segI], rawLines[k], langCode);
-        result.warnings.forEach(function (w) {
-          warnings.push({ message: formatSegmentWarning(w, blockIndex, segI) });
-        });
-        outSegs[segI] = result.html;
-      });
-      enSegments.forEach(function (_, i) {
-        if (mediaOnly[i]) outSegs[i] = enGroupsPerSeg[i].map(function (g) { return mediaGroupHtml(g, langCode); }).join('');
-      });
-      return wrapBlockHtml(block, outSegs.join('<br>'));
-    }
-
-    // Tier 2: sentence-level fallback (skipped for languages without
-    // reliable sentence-final punctuation, e.g. Thai).
-    if (langTerminators && langTerminators.length > 0 && realIdx.length > 0) {
-      const realSegs = realIdx.map(function (i) { return enSegments[i]; });
-      const enInfo = buildEnAtoms(realSegs);
-      const enSentences = splitSentencesWithOffsets(enInfo.text, EN_SENTENCE_TERMINATORS);
-      const targetFullText = rawLines.join(' ');
-      const targetSentences = splitSentencesWithOffsets(targetFullText, langTerminators);
-      if (enSentences && targetSentences && enSentences.length === targetSentences.length && enSentences.length > 0) {
-        let html = '';
-        for (let i = 0; i < enSentences.length; i++) {
-          const tags = tagsForRange(enInfo.atoms, enSentences[i].start, enSentences[i].end);
-          html += (i > 0 ? ' ' : '') + wrapTags(tags, escapeHtml(targetSentences[i].text));
-        }
-        warnings.push({
-          message: 'Block ' + (blockIndex + 1) + ': line count did not match for this language (EN ' + realIdx.length +
-            ' line(s), translation ' + rawLines.length + ' line(s)); matched ' + enSentences.length +
-            ' sentence(s) instead. Original line breaks are not preserved for this block in this language — please verify.'
-        });
-        const media = leadAndTrailMediaHtml(enGroupsPerSeg, mediaOnly, langCode);
-        return wrapBlockHtml(block, media.lead + html + media.trail);
+  const enLinks = [];
+  for (const p of enParagraphs) {
+    for (const line of p) {
+      for (const run of line) {
+        if (run.linkHref) enLinks.push({ text: run.text, href: run.linkHref });
       }
     }
-
-    // Tier 3: warning fallback — never drop translator content or guess
-    // styling; show the translation as-is and flag it for manual review.
-    const sentenceNote = (langTerminators && langTerminators.length > 0)
-      ? '; sentence-level matching also failed'
-      : '; sentence-level matching is not supported for this language';
-    warnings.push({
-      message: 'Block ' + (blockIndex + 1) + ': could not match EN structure for this language (EN has ' + realIdx.length +
-        ' line(s), translation has ' + rawLines.length + ' line(s)' + sentenceNote +
-        ') — shown unstyled, please review and style manually.'
-    });
-    const media = leadAndTrailMediaHtml(enGroupsPerSeg, mediaOnly, langCode);
-    const plainHtml = rawLines.map(escapeHtml).join('<br>');
-    return wrapBlockHtml(block, media.lead + plainHtml + media.trail);
   }
 
-  // ---------------------------------------------------------------------
-  // Filename rewriting (Section 7)
-  // ---------------------------------------------------------------------
-  function rewriteMediaHtml(html, code) {
-    const container = document.createElement('div');
-    container.innerHTML = html;
-    container.querySelectorAll('img, video').forEach(function (el) {
-      const src = el.getAttribute('src');
-      if (!src) return;
-      const rewritten = src.replace(/-(\s*)EN(\.[A-Za-z0-9]+)(?=$|[?#])/, '-$1' + code + '$2');
-      if (rewritten !== src) el.setAttribute('src', rewritten);
-    });
-    return container.innerHTML;
-  }
+  const flags = [];
+  const outputs = {};
 
-  // ---------------------------------------------------------------------
-  // Per-language assembly
-  // ---------------------------------------------------------------------
-  function generateLanguageOutput(blocks, contentRows, code, name, langTerminators) {
-    const warnings = [];
-    let rowCursor = 0;
-    const parts = [];
-
-    for (let bi = 0; bi < blocks.length; bi++) {
-      const block = blocks[bi];
-      if (block.type === 'media') {
-        parts.push(rewriteMediaHtml(block.html, code));
-        continue;
-      }
-      if (!blockHasContent(block)) {
-        parts.push(reconstructEnBlockHtml(block, code));
-        continue;
-      }
-      if (rowCursor >= contentRows.length) {
-        warnings.push({ message: 'Block ' + (bi + 1) + ': ran out of Excel content rows to match — EN text used as a placeholder, please review.' });
-        parts.push(reconstructEnBlockHtml(block, code));
-        continue;
-      }
-      const row = contentRows[rowCursor++];
-      const cellText = row.cells[code];
-      const blockWarnings = [];
-      // A failure inside one block's matching (an unexpected exception, not
-      // just an ordinary tier-1/2 mismatch, which buildTranslatedTextBlock
-      // already handles via its own warning fallback) must never abort the
-      // rest of this language's output. Degrade just this block to the raw
-      // EN text and keep going.
-      try {
-        parts.push(buildTranslatedTextBlock(block, cellText, bi, blockWarnings, code, langTerminators));
-        blockWarnings.forEach(function (w) { warnings.push(w); });
-      } catch (err) {
-        warnings.push({ message: 'Block ' + (bi + 1) + ': an unexpected error occurred while matching this block (' + err.message + ') — EN text used as a placeholder, please review.' });
-        parts.push(reconstructEnBlockHtml(block, code));
+  for (const lang of lookup.languages) {
+    if (lang.code === "EN") continue;
+    let colIdx = -1;
+    for (let i = 0; i < headerRow.length; i++) {
+      const h = String(headerRow[i]).trim();
+      if (mutationMap.get(h) === lang.code) {
+        colIdx = i;
+        break;
       }
     }
-
-    if (rowCursor < contentRows.length) {
-      warnings.push({ message: 'Note: ' + (contentRows.length - rowCursor) + ' extra Excel row(s) below the last block were not used. This usually means the EN sourcecode has fewer separate blocks (paragraphs) than the Excel sheet has content rows — e.g. two sections that should be separate <p> paragraphs got merged into one. Check for missing paragraph breaks in the EN paste; the row-to-block matching cannot recover them automatically.' });
+    if (colIdx === -1) {
+      flags.push(`${lang.code}: no matching column found in sheet — skipped.`);
+      continue;
     }
 
-    return { code: code, name: name, html: parts.join(''), warnings: warnings };
+    onProgress && onProgress(`Processing ${lang.code}...`);
+
+    const targetFlat = contentRowIndices.map((r) => String(rows[r][colIdx])).join("\n");
+    const targetParagraphTexts = targetFlat.split("\n\n");
+
+    const blocks = await buildLanguageOutput(
+      lang.code,
+      targetParagraphTexts,
+      enStyleRuns,
+      enLinks,
+      mediaInsertions,
+      flags
+    );
+
+    // Each block is already a complete <p>...</p> or media element;
+    // join them as siblings. No leading empty <p></p><p></p> spacer is
+    // assumed here — that was specific to the validated test page's own
+    // layout, not a general rule, so it isn't reproduced automatically.
+    outputs[lang.code] = blocks.map((b) => b.html).join("");
   }
 
-  // ---------------------------------------------------------------------
-  // UI
-  // ---------------------------------------------------------------------
-  function $(id) { return document.getElementById(id); }
+  return { outputs, flags };
+}
 
-  function cacheEls() {
-    els.enSource = $('en-source');
-    els.dropZone = $('drop-zone');
-    els.fileInput = $('file-input');
-    els.fileName = $('file-name');
-    els.sheetSelectWrap = $('sheet-select-wrap');
-    els.sheetSelect = $('sheet-select');
-    els.processBtn = $('process-btn');
-    els.globalError = $('global-error');
-    els.outputPlaceholder = $('output-placeholder');
-    els.outputGrid = $('output-grid');
-  }
-
-  function showGlobalError(msg) {
-    els.globalError.textContent = msg;
-    els.globalError.classList.remove('hidden');
-  }
-  function clearGlobalError() {
-    els.globalError.textContent = '';
-    els.globalError.classList.add('hidden');
-  }
-
-  function updateProcessButtonState() {
-    els.processBtn.disabled = !(state.workbook && els.enSource.value.trim());
-  }
-
-  function handleFile(file) {
-    if (!file) return;
-    if (typeof XLSX === 'undefined') {
-      showGlobalError('The Excel parsing library did not load from the CDN. Check your network connection (or firewall) and reload the page.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = function (e) {
-      try {
-        const data = new Uint8Array(e.target.result);
-        const workbook = XLSX.read(data, { type: 'array' });
-        state.workbook = workbook;
-        state.fileName = file.name;
-        els.fileName.textContent = file.name;
-        populateSheetSelect(workbook);
-        clearGlobalError();
-        resetOutput();
-        updateProcessButtonState();
-      } catch (err) {
-        state.workbook = null;
-        showGlobalError('Could not read this Excel file: ' + err.message);
-        updateProcessButtonState();
-      }
-    };
-    reader.onerror = function () {
-      showGlobalError('Could not read the selected file.');
-    };
-    reader.readAsArrayBuffer(file);
-  }
-
-  function populateSheetSelect(workbook) {
-    els.sheetSelect.innerHTML = '';
-    workbook.SheetNames.forEach(function (name) {
-      const opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name;
-      els.sheetSelect.appendChild(opt);
-    });
-    els.sheetSelectWrap.classList.toggle('hidden', workbook.SheetNames.length <= 1);
-  }
-
-  function resetOutput() {
-    els.outputGrid.innerHTML = '';
-    els.outputPlaceholder.classList.remove('hidden');
-  }
-
-  function copyToClipboard(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-        resolve();
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
-  function renderOutputs(results) {
-    els.outputPlaceholder.classList.add('hidden');
-    els.outputGrid.innerHTML = '';
-
-    results.forEach(function (result) {
-      const card = document.createElement('div');
-      card.className = 'lang-card';
-
-      const head = document.createElement('div');
-      head.className = 'lang-card-head';
-
-      const titleWrap = document.createElement('div');
-      const title = document.createElement('div');
-      title.className = 'lang-card-title';
-      title.textContent = result.name;
-      const code = document.createElement('div');
-      code.className = 'lang-card-code';
-      code.textContent = result.code;
-      titleWrap.appendChild(title);
-      titleWrap.appendChild(code);
-      head.appendChild(titleWrap);
-
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'copy-btn';
-      copyBtn.textContent = 'Copy';
-      head.appendChild(copyBtn);
-
-      card.appendChild(head);
-
-      if (result.error) {
-        card.classList.add('has-error');
-        const errBox = document.createElement('div');
-        errBox.className = 'lang-card-error';
-        errBox.textContent = result.error;
-        card.appendChild(errBox);
-        copyBtn.disabled = true;
-      } else {
-        if (result.warnings.length) {
-          card.classList.add('has-warning');
-          const list = document.createElement('ul');
-          list.className = 'warning-list';
-          result.warnings.forEach(function (w) {
-            const li = document.createElement('li');
-            li.textContent = w.message;
-            list.appendChild(li);
-          });
-          card.appendChild(list);
-        }
-
-        const details = document.createElement('details');
-        details.className = 'preview';
-        const summary = document.createElement('summary');
-        summary.textContent = 'Preview sourcecode';
-        const pre = document.createElement('pre');
-        pre.textContent = result.html;
-        details.appendChild(summary);
-        details.appendChild(pre);
-        card.appendChild(details);
-
-        copyBtn.addEventListener('click', function () {
-          copyToClipboard(result.html).then(function () {
-            copyBtn.classList.add('copied');
-            const prevText = copyBtn.textContent;
-            copyBtn.textContent = 'Copied ✓';
-            setTimeout(function () {
-              copyBtn.textContent = prevText === 'Copied ✓' ? 'Copy' : prevText;
-            }, 1600);
-          }).catch(function () {
-            showGlobalError('Clipboard copy failed for ' + result.name + '. Please copy manually from the preview.');
-          });
-        });
-      }
-
-      els.outputGrid.appendChild(card);
-    });
-  }
-
-  function processAll() {
-    clearGlobalError();
-    const enHtml = els.enSource.value;
-    if (!enHtml.trim()) {
-      showGlobalError('Please paste the EN sourcecode first.');
-      return;
-    }
-    if (!state.workbook) {
-      showGlobalError('Please upload the translation Excel file first.');
-      return;
-    }
-
-    const sheetName = els.sheetSelect.value || state.workbook.SheetNames[0];
-    const sheet = state.workbook.Sheets[sheetName];
-    if (!sheet) {
-      showGlobalError('Could not find sheet "' + sheetName + '" in the workbook.');
-      return;
-    }
-    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
-
-    const headerRowIdx = detectHeaderRow(matrix, state.lookupIndex);
-    if (headerRowIdx === -1) {
-      showGlobalError('Could not detect a language header row in sheet "' + sheetName + '". Make sure it has a row with language column headers (e.g. EN, KR, JP, ...).');
-      return;
-    }
-
-    const columnMap = buildColumnMap(matrix, headerRowIdx, state.lookupIndex);
-    const contentRows = extractContentRows(matrix, headerRowIdx, columnMap);
-    if (contentRows.length === 0) {
-      showGlobalError('No content rows were detected below the header row in sheet "' + sheetName + '".');
-      return;
-    }
-
-    let blocks;
-    try {
-      blocks = parseBlocks(enHtml);
-    } catch (err) {
-      showGlobalError('Could not parse the EN sourcecode: ' + err.message);
-      return;
-    }
-
-    const foundCodes = new Set(columnMap.filter(function (c) { return c.type === 'lang'; }).map(function (c) { return c.code; }));
-
-    const results = state.targetLanguages.map(function (lang) {
-      if (!foundCodes.has(lang.code)) {
-        return { code: lang.code, name: lang.name, error: 'Language column for ' + lang.name + ' (' + lang.code + ') was not found in sheet "' + sheetName + '".' };
-      }
-      return generateLanguageOutput(blocks, contentRows, lang.code, lang.name, lang.sentence_terminators);
-    });
-
-    renderOutputs(results);
-  }
-
-  // ---------------------------------------------------------------------
-  // Wiring
-  // ---------------------------------------------------------------------
-  function wireEvents() {
-    els.enSource.addEventListener('input', updateProcessButtonState);
-
-    els.fileInput.addEventListener('change', function (e) {
-      handleFile(e.target.files[0]);
-    });
-
-    ['dragover', 'dragenter'].forEach(function (evt) {
-      els.dropZone.addEventListener(evt, function (e) {
-        e.preventDefault();
-        els.dropZone.classList.add('drag-over');
-      });
-    });
-    ['dragleave', 'dragend'].forEach(function (evt) {
-      els.dropZone.addEventListener(evt, function () {
-        els.dropZone.classList.remove('drag-over');
-      });
-    });
-    els.dropZone.addEventListener('drop', function (e) {
-      e.preventDefault();
-      els.dropZone.classList.remove('drag-over');
-      const file = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (file) handleFile(file);
-    });
-
-    els.sheetSelect.addEventListener('change', resetOutput);
-
-    els.processBtn.addEventListener('click', processAll);
-  }
-
-  async function init() {
-    cacheEls();
-    wireEvents();
-    if (typeof XLSX === 'undefined') {
-      showGlobalError('Could not load the Excel parsing library from the CDN. Check your network connection (or firewall) and reload the page.');
-    }
-    state.lookup = await loadLookup();
-    state.lookupIndex = buildLookupIndex(state.lookup);
-    state.targetLanguages = state.lookup.languages.filter(function (l) { return l.code !== 'EN'; });
-    updateProcessButtonState();
-  }
-
-  document.addEventListener('DOMContentLoaded', init);
-})();
+window.wiki14 = {
+  runPipeline,
+  // Exposed for debugging/testing in the browser console.
+  _internal: { tokenizeSourcecode, flattenTokens, buildStructure, paragraphStyleKeys, collapseStyleRuns, paragraphPlainText },
+};

@@ -1,0 +1,7 @@
+name = "wiki14-gemini-proxy"
+main = "index.js"
+compatibility_date = "2026-08-01"
+
+# Secrets — set these with `wrangler secret put <NAME>`, never write them here:
+#   GEMINI_API_KEY   your Gemini API key from Google AI Studio
+#   APP_TOKEN        any random string you invent; must match site/app.js CONFIG.appToken
