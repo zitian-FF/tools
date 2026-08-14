@@ -181,3 +181,64 @@ pre.code-output {
   max-height: 400px;
   overflow-y: auto;
 }
+
+/* Help toggle — fixed corner button + slide-out panel */
+
+.help-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 20;
+  line-height: 1;
+}
+.help-toggle:hover {
+  border-color: var(--accent);
+}
+.help-toggle[aria-expanded="true"] {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.help-panel {
+  position: fixed;
+  top: 56px;
+  right: 16px;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  z-index: 19;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.help-panel h2 {
+  font-size: 14px;
+  margin: 0 0 10px;
+}
+
+.help-panel ol {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.help-panel li {
+  margin-bottom: 6px;
+}
+.help-panel li:last-child {
+  margin-bottom: 0;
+  color: var(--muted);
+}

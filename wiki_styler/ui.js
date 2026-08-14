@@ -11,7 +11,23 @@ const els = {
   results: document.getElementById("results"),
   tabs: document.getElementById("result-tabs"),
   panels: document.getElementById("result-panels"),
+  helpToggle: document.getElementById("help-toggle"),
+  helpPanel: document.getElementById("help-panel"),
 };
+
+els.helpToggle.addEventListener("click", () => {
+  const isOpen = !els.helpPanel.classList.contains("hidden");
+  els.helpPanel.classList.toggle("hidden", isOpen);
+  els.helpToggle.setAttribute("aria-expanded", String(!isOpen));
+});
+
+document.addEventListener("click", (e) => {
+  const clickedInsidePanel = els.helpPanel.contains(e.target) || els.helpToggle.contains(e.target);
+  if (!clickedInsidePanel && !els.helpPanel.classList.contains("hidden")) {
+    els.helpPanel.classList.add("hidden");
+    els.helpToggle.setAttribute("aria-expanded", "false");
+  }
+});
 
 let workbookArrayBuffer = null;
 let workbookSheetNames = [];
