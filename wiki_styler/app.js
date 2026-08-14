@@ -21,7 +21,7 @@
 
 const CONFIG = {
   workerUrl: "https://wiki14-gemini-proxy.tianz-88.workers.dev", // TODO: set to your deployed Worker URL
-  appToken: "bf978s39fh9wh9873grg2987gr9723", // TODO: must match the Worker's APP_TOKEN secret
+  appToken: "sd2r39r97297r3237rg1g91g98", // TODO: must match the Worker's APP_TOKEN secret
 };
 
 let LANGUAGE_LOOKUP = null;
