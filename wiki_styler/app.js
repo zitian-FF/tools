@@ -1,16 +1,30 @@
 // wiki14 — client-side pipeline
 //
 // Mirrors the algorithm validated by hand against a real wiki page:
-//   1. Flatten EN sourcecode (DOM walk, <br> -> \n) and diff against the
-//      EN Excel column (rows joined by single \n) to confirm alignment
-//      and to identify + exclude metadata rows.
-//   2. Split the flattened EN text into paragraphs (\n\n) and record which
-//      style wraps each paragraph (and where images/links sit).
-//   3. For each target language: flatten + split the same way.
+//   1. Parse the EN sourcecode's real paragraph structure first (ground
+//      truth): DOM walk into styled paragraphs, splitting on both <br><br>
+//      and <p>/<div> block boundaries (buildStructure) — this is the
+//      actual paragraph count and style map, not an approximation of it.
+//   2. Map each matched Excel row to the span of EN paragraphs its content
+//      falls within, by walking cumulative whitespace-stripped content
+//      length rather than assuming any fixed delimiter between rows — the
+//      real separator at a given row-to-row seam (a single <br> within one
+//      shared paragraph, a real blank line, or nothing at all across a
+//      bare block boundary) is a property of that page's markup at that
+//      exact seam, not something a fixed "\n" or "\n\n" join could ever
+//      guess correctly across different pages.
+//   3. From that EN-only mapping, derive one merge/fresh-break boolean per
+//      row-to-row transition (do the two rows share the same EN paragraph,
+//      or not) — a structural property of the page, computed once and
+//      reused identically for every target language.
+//   4. For each target language: rebuild its own paragraph list from its
+//      own rows' raw text (splitting each row on its own internal "\n\n",
+//      always reliable since it's a single cell), applying the same
+//      merge/fresh-break pattern at each row boundary.
 //      - Paragraph count matches EN -> apply the style map directly.
 //      - Paragraph count doesn't match -> ask the Gemini proxy to resolve
 //        paragraph-range boundaries per styled section.
-//   4. Reassemble HTML, merging consecutive same-style paragraphs into a
+//   5. Reassemble HTML, merging consecutive same-style paragraphs into a
 //      single continuous tag (matching how the EN source itself is written).
 //
 // Known limitation (unchanged from the manual process): this only handles
@@ -330,6 +344,20 @@ function normalizeForMatch(s) {
     .trim();
 }
 
+// Content-identity comparison: strip decorative quotes and normalize
+// dashes (same as normalizeForMatch), then remove ALL whitespace rather
+// than collapsing it. Paragraph/line-break position is exactly the thing
+// that can legitimately differ between the sourcecode and Excel without
+// being a real content difference (that's the whole reason offset-based
+// row-to-paragraph mapping exists below) — so comparisons that care about
+// content identity, not layout, need whitespace out of the way entirely.
+function stripAllWhitespace(s) {
+  return s
+    .replace(/[–—]/g, "-")
+    .replace(/[\u201c\u201d"'\u2018\u2019]/g, "")
+    .replace(/\s+/g, "");
+}
+
 function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
   // A row is "content" if its EN cell text appears (after normalization)
   // inside the flattened sourcecode text. This naturally excludes checker
@@ -351,6 +379,113 @@ function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
     }
   }
   return { contentRowIndices, excludedRows };
+}
+
+// Maps each matched Excel row (in order) to the span of EN paragraphs its
+// content falls within, using cumulative whitespace-stripped content
+// length rather than any assumption about what character (if any)
+// separates two adjacent rows in the sourcecode — that separator is a
+// property of the page's markup at that specific seam (a single <br>
+// within one shared paragraph, a real blank line, or nothing at all across
+// a bare block boundary), not a property of the rows themselves, so no
+// fixed delimiter is ever correct across different pages. Throws if the
+// rows' total stripped content length doesn't exactly equal the EN
+// paragraphs' total stripped content length — a genuine content
+// difference (a missing/extra word or sentence), not just formatting.
+// Returns [{row, firstParaIdx, lastParaIdx, coreLen}, ...] per content row.
+function mapRowsToParagraphs(contentRowIndices, rows, colIdx, enParagraphTexts, rowLabelForError) {
+  const paraLens = enParagraphTexts.map((t) => stripAllWhitespace(t).length);
+  const paraCumulative = [0];
+  for (const len of paraLens) paraCumulative.push(paraCumulative[paraCumulative.length - 1] + len);
+  const totalLen = paraCumulative[paraCumulative.length - 1];
+
+  function paragraphIndexForOffset(offset) {
+    for (let i = 0; i < enParagraphTexts.length; i++) {
+      if (offset >= paraCumulative[i] && offset < paraCumulative[i + 1]) return i;
+    }
+    return enParagraphTexts.length - 1;
+  }
+
+  const rowSpans = [];
+  let cursor = 0;
+  for (const r of contentRowIndices) {
+    const rowText = String(rows[r][colIdx] == null ? "" : rows[r][colIdx]);
+    const coreLen = stripAllWhitespace(rowText).length;
+    const startOffset = cursor;
+    const endOffsetExclusive = cursor + coreLen;
+    const firstParaIdx = paragraphIndexForOffset(startOffset);
+    const lastParaIdx = coreLen > 0 ? paragraphIndexForOffset(endOffsetExclusive - 1) : firstParaIdx;
+    rowSpans.push({ row: r, firstParaIdx, lastParaIdx, coreLen });
+    cursor = endOffsetExclusive;
+  }
+
+  if (cursor !== totalLen) {
+    throw new Error(
+      `${rowLabelForError} content length mismatch: the matched Excel rows' combined content is ${cursor} ` +
+        `characters (ignoring whitespace/quotes/dash style) but the sourcecode's parsed paragraphs total ${totalLen}. ` +
+        "This is a genuine content difference (e.g. a missing or extra word/sentence), not just formatting."
+    );
+  }
+
+  return rowSpans;
+}
+
+// For each consecutive pair of row spans, true if the previous row's
+// content ends in the same EN paragraph the next row's content starts in
+// — i.e. no block boundary separates them in the sourcecode, so their
+// content must be reassembled as one continuous paragraph for every
+// language. Computed once from the EN-derived rowSpans and reused
+// identically for every target language, since it's a structural property
+// of the page, not of any one language's translation.
+function computeRowTransitionMerges(rowSpans) {
+  const merges = [];
+  for (let i = 0; i < rowSpans.length - 1; i++) {
+    merges.push(rowSpans[i].lastParaIdx === rowSpans[i + 1].firstParaIdx);
+  }
+  return merges;
+}
+
+// Builds one language's paragraph-text list directly from its own rows'
+// raw text — no cross-row delimiter guessing, since each row's internal
+// "\n\n" split is always reliable (a single cell, not spanning rows).
+// rowTransitionMerges (from the EN-only mapping) says whether the
+// transition INTO each row continues the previous row's last paragraph or
+// starts fresh.
+function buildParagraphTextsFromRows(contentRowIndices, rows, colIdx, rowTransitionMerges) {
+  const paragraphTexts = [];
+  let accumulator = null; // pending paragraph text, open across a merged row boundary
+
+  contentRowIndices.forEach((r, i) => {
+    const rowText = String(rows[r][colIdx] == null ? "" : rows[r][colIdx]);
+    const subParas = rowText.split("\n\n");
+    const mergeIntoThisRow = i > 0 && rowTransitionMerges[i - 1];
+
+    if (mergeIntoThisRow && accumulator !== null) {
+      accumulator += "\n" + subParas[0];
+    } else {
+      if (accumulator !== null) paragraphTexts.push(accumulator);
+      accumulator = subParas[0];
+    }
+
+    // Sub-paragraphs strictly between this row's first and last are
+    // complete standalone paragraphs — nothing before or after them in
+    // this row shares them.
+    for (let k = 1; k < subParas.length - 1; k++) {
+      paragraphTexts.push(accumulator);
+      accumulator = subParas[k];
+    }
+
+    // The row's last sub-paragraph becomes the new pending accumulator,
+    // staying open in case the next row's transition merges into it.
+    if (subParas.length > 1) {
+      paragraphTexts.push(accumulator);
+      accumulator = subParas[subParas.length - 1];
+    }
+  });
+
+  if (accumulator !== null) paragraphTexts.push(accumulator);
+
+  return paragraphTexts;
 }
 
 // ---------- Gemini fallback ----------
@@ -567,41 +702,6 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
     throw new Error("No Excel rows matched the sourcecode — check the sheet and sourcecode are for the same page.");
   }
 
-  // Validate: EN rows joined by \n should match the flattened sourcecode.
-  // We check paragraph COUNT/boundaries rather than raw character equality,
-  // because real pages can have decorative punctuation in the sourcecode
-  // (curly quotes wrapping a heading, etc.) added directly by whoever
-  // styled the EN version, which was never copied into the Excel's plain
-  // text. That's cosmetic and doesn't affect paragraph structure — but a
-  // genuine paragraph-count mismatch means something real is wrong (a
-  // metadata row miscategorized as content, sheet/sourcecode out of sync,
-  // etc.) and should stop the pipeline rather than guess past it.
-  const enRowsFlat = contentRowIndices.map((r) => String(rows[r][enColIdx])).join("\n");
-  const sourceParagraphCount = enFlat.split("\n\n").length;
-  const excelParagraphCount = enRowsFlat.split("\n\n").length;
-  if (sourceParagraphCount !== excelParagraphCount) {
-    const contentLines = contentRowIndices
-      .map((r) => `  CONTENT row ${r + 1}: "${String(rows[r][enColIdx]).slice(0, 60)}"`)
-      .join("\n");
-    const excludedLines = excludedRows
-      .map((x) => `  EXCLUDED row ${x.row + 1}: "${x.preview}"`)
-      .join("\n");
-    throw new Error(
-      `Flatten-and-diff check failed: the EN sourcecode implies ${sourceParagraphCount} paragraphs but the ` +
-        `EN Excel content implies ${excelParagraphCount}.\n\n` +
-        `Rows classified as CONTENT:\n${contentLines || "  (none)"}\n\n` +
-        `Rows classified as EXCLUDED (had EN text, but it wasn't found in the sourcecode):\n${excludedLines || "  (none)"}\n\n` +
-        "Likely cause: a real content row was wrongly excluded (formatting drift between the sourcecode and the sheet), " +
-        "or a metadata row was wrongly included (its text happens to overlap with the sourcecode). Check the rows above."
-    );
-  }
-  if (enRowsFlat !== enFlat) {
-    console.warn(
-      "wiki14: EN sourcecode text has minor character differences from the Excel EN column " +
-        "(often decorative punctuation not present in the sheet) — paragraph structure still lines up, proceeding."
-    );
-  }
-
   const { paragraphs: enParagraphs, mediaInsertions } = buildStructure(tokens);
   const paraStyles = paragraphStyleKeys(enParagraphs);
   const mixedParagraphs = paraStyles
@@ -615,6 +715,34 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
     );
   }
   const enStyleRuns = collapseStyleRuns(paraStyles);
+  const enParagraphTexts = enParagraphs.map(paragraphPlainText);
+
+  // Map each matched Excel row to the EN paragraphs its content falls
+  // within, by content length rather than any assumption about what
+  // separates two adjacent rows in the sourcecode (see the file-level
+  // comment above). A thrown error here means a genuine content
+  // difference, not just formatting — append the same included/excluded
+  // row diagnostic the old paragraph-count check used, so whoever hits
+  // this can still see exactly which row is the problem.
+  let rowSpans;
+  try {
+    rowSpans = mapRowsToParagraphs(contentRowIndices, rows, enColIdx, enParagraphTexts, "EN");
+  } catch (e) {
+    const contentLines = contentRowIndices
+      .map((r) => `  CONTENT row ${r + 1}: "${String(rows[r][enColIdx]).slice(0, 60)}"`)
+      .join("\n");
+    const excludedLines = excludedRows
+      .map((x) => `  EXCLUDED row ${x.row + 1}: "${x.preview}"`)
+      .join("\n");
+    throw new Error(
+      `${e.message}\n\n` +
+        `Rows classified as CONTENT:\n${contentLines || "  (none)"}\n\n` +
+        `Rows classified as EXCLUDED (had EN text, but it wasn't found in the sourcecode):\n${excludedLines || "  (none)"}\n\n` +
+        "Likely cause: a real content row was wrongly excluded (formatting drift between the sourcecode and the sheet), " +
+        "or a metadata row was wrongly included (its text happens to overlap with the sourcecode). Check the rows above."
+    );
+  }
+  const rowTransitionMerges = computeRowTransitionMerges(rowSpans);
 
   const enLinks = [];
   for (const p of enParagraphs) {
@@ -645,8 +773,10 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
 
     onProgress && onProgress(`Processing ${lang.code}...`);
 
-    const targetFlat = contentRowIndices.map((r) => String(rows[r][colIdx])).join("\n");
-    const targetParagraphTexts = targetFlat.split("\n\n");
+    // Rebuilt directly from this language's own row text, applying the
+    // same merge/fresh-break pattern EN's rows established at each row
+    // boundary — no delimiter guessing between rows.
+    const targetParagraphTexts = buildParagraphTextsFromRows(contentRowIndices, rows, colIdx, rowTransitionMerges);
 
     const blocks = await buildLanguageOutput(
       lang.code,
@@ -673,5 +803,16 @@ window.wiki14 = {
   parseGoogleSheetsUrl,
   fetchGoogleSheetCsv,
   // Exposed for debugging/testing in the browser console.
-  _internal: { tokenizeSourcecode, flattenTokens, buildStructure, paragraphStyleKeys, collapseStyleRuns, paragraphPlainText },
+  _internal: {
+    tokenizeSourcecode,
+    flattenTokens,
+    buildStructure,
+    paragraphStyleKeys,
+    collapseStyleRuns,
+    paragraphPlainText,
+    stripAllWhitespace,
+    mapRowsToParagraphs,
+    computeRowTransitionMerges,
+    buildParagraphTextsFromRows,
+  },
 };
