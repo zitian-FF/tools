@@ -313,29 +313,44 @@ function findEnColumn(headerRow) {
 }
 
 function normalizeForMatch(s) {
-  // Strip typographic quote marks and collapse whitespace before checking
-  // containment. Real sourcecode sometimes has decorative curly quotes
-  // around a heading that were never copied into the Excel's plain text
-  // (cosmetic, added directly by whoever styled the EN version) — that
-  // shouldn't cause a real content row to be misclassified as metadata.
-  return s.replace(/[“”"'‘’]/g, "").replace(/\s+/g, " ").trim();
+  // Normalize formatting differences that can drift between the sourcecode
+  // and the Excel EN column without being a real content mismatch: line
+  // ending style, smart dashes, non-breaking spaces, and decorative curly
+  // quotes (real sourcecode sometimes has these wrapping a heading that
+  // were never copied into the Excel's plain text, added directly by
+  // whoever styled the EN version) — none of that should cause a real
+  // content row to be misclassified as metadata, or vice versa. Collapse
+  // whitespace last so the earlier substitutions feed into one final pass.
+  return s
+    .replace(/\r\n|\r/g, "\n")
+    .replace(/[–—]/g, "-")
+    .replace(/\u00a0/g, " ")
+    .replace(/[“”"'‘’]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
   // A row is "content" if its EN cell text appears (after normalization)
   // inside the flattened sourcecode text. This naturally excludes checker
   // names, proofread checkboxes, and blank rows without needing to know
-  // the sheet's specific column layout.
+  // the sheet's specific column layout. Rows with EN text that don't match
+  // are returned too (excludedRows) so a paragraph-count mismatch later can
+  // point at exactly which row is the likely culprit instead of just two
+  // numbers.
   const normalizedFlat = normalizeForMatch(enFlatFromSourcecode);
   const contentRowIndices = [];
+  const excludedRows = [];
   for (let r = 1; r < rows.length; r++) {
     const cell = rows[r][enColIdx];
     if (typeof cell !== "string" || cell.trim().length === 0) continue;
     if (normalizedFlat.includes(normalizeForMatch(cell))) {
       contentRowIndices.push(r);
+    } else {
+      excludedRows.push({ row: r, preview: cell.slice(0, 60) });
     }
   }
-  return contentRowIndices;
+  return { contentRowIndices, excludedRows };
 }
 
 // ---------- Gemini fallback ----------
@@ -547,7 +562,7 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
   const tokens = tokenizeSourcecode(enSourcecode);
   const enFlat = flattenTokens(tokens);
 
-  const contentRowIndices = identifyContentRows(rows, enColIdx, enFlat);
+  const { contentRowIndices, excludedRows } = identifyContentRows(rows, enColIdx, enFlat);
   if (contentRowIndices.length === 0) {
     throw new Error("No Excel rows matched the sourcecode — check the sheet and sourcecode are for the same page.");
   }
@@ -565,10 +580,19 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
   const sourceParagraphCount = enFlat.split("\n\n").length;
   const excelParagraphCount = enRowsFlat.split("\n\n").length;
   if (sourceParagraphCount !== excelParagraphCount) {
+    const contentLines = contentRowIndices
+      .map((r) => `  CONTENT row ${r + 1}: "${String(rows[r][enColIdx]).slice(0, 60)}"`)
+      .join("\n");
+    const excludedLines = excludedRows
+      .map((x) => `  EXCLUDED row ${x.row + 1}: "${x.preview}"`)
+      .join("\n");
     throw new Error(
       `Flatten-and-diff check failed: the EN sourcecode implies ${sourceParagraphCount} paragraphs but the ` +
-        `EN Excel content implies ${excelParagraphCount}. This usually means a metadata row was miscategorized ` +
-        "as content, or the sourcecode/sheet are out of sync. Not proceeding automatically — please check the two inputs match."
+        `EN Excel content implies ${excelParagraphCount}.\n\n` +
+        `Rows classified as CONTENT:\n${contentLines || "  (none)"}\n\n` +
+        `Rows classified as EXCLUDED (had EN text, but it wasn't found in the sourcecode):\n${excludedLines || "  (none)"}\n\n` +
+        "Likely cause: a real content row was wrongly excluded (formatting drift between the sourcecode and the sheet), " +
+        "or a metadata row was wrongly included (its text happens to overlap with the sourcecode). Check the rows above."
     );
   }
   if (enRowsFlat !== enFlat) {
