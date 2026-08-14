@@ -249,8 +249,55 @@ function paragraphPlainText(lines) {
 
 // ---------- Excel handling ----------
 
-function readWorkbook(arrayBuffer) {
-  return XLSX.read(arrayBuffer, { type: "array" });
+// workbookSource is { type: "arraybuffer", data } for a local file upload,
+// or { type: "csv", data } for a Google Sheets CSV export (the /fetch-sheet
+// Worker route always returns exactly the one tab identified by gid, so
+// there's no multi-sheet ambiguity to resolve on that path).
+function readWorkbook(workbookSource) {
+  if (workbookSource.type === "csv") {
+    return XLSX.read(workbookSource.data, { type: "string" });
+  }
+  return XLSX.read(workbookSource.data, { type: "array" });
+}
+
+// ---------- Google Sheets URL handling ----------
+
+function parseGoogleSheetsUrl(url) {
+  const idMatch = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (!idMatch) {
+    throw new Error(
+      "That doesn't look like a Google Sheets URL — expected something like " +
+        "https://docs.google.com/spreadsheets/d/<id>/edit#gid=<gid>."
+    );
+  }
+  const gidMatch = url.match(/[#&?]gid=(\d+)/);
+  return { sheetId: idMatch[1], gid: gidMatch ? gidMatch[1] : null };
+}
+
+// Google's CSV export endpoint doesn't reliably send CORS headers for a
+// cross-origin browser fetch, so this goes through the Worker instead of
+// calling Google directly.
+async function fetchGoogleSheetCsv(sheetId, gid) {
+  const resp = await fetch(`${CONFIG.workerUrl}/fetch-sheet`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-app-token": CONFIG.appToken,
+    },
+    body: JSON.stringify({ sheetId, gid: gid || "0" }),
+  });
+  if (!resp.ok) {
+    let message = `Fetch-sheet request failed: ${resp.status}`;
+    try {
+      const body = await resp.json();
+      if (body && body.error) message = body.error;
+    } catch {
+      // Response body wasn't JSON — keep the generic status-based message.
+    }
+    throw new Error(message);
+  }
+  const body = await resp.json();
+  return body.csv;
 }
 
 function sheetToRows(sheet) {
@@ -294,7 +341,7 @@ function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
 // ---------- Gemini fallback ----------
 
 async function resolveViaGemini(styleRuns, targetParagraphTexts) {
-  const resp = await fetch(CONFIG.workerUrl, {
+  const resp = await fetch(`${CONFIG.workerUrl}/resolve-styles`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -342,7 +389,30 @@ function renderParagraphRange(paragraphTexts, start, end, openTag, closeTag, enL
   return `${openTag}${inner}${closeTag}`;
 }
 
-async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLinks, mediaInsertions, flagsOut) {
+// Applies the media localization mode to one image/video src:
+//   "dont-localize"      — always return src unchanged.
+//   "localize"           — swap "_EN." to "_{code}." when present; if the
+//                           "_EN." pattern isn't found, leave src unchanged
+//                           silently (assumes every file follows the
+//                           convention, so a miss isn't worth flagging).
+//   "localize-if-suffix" — same swap-if-present behavior, but a miss gets
+//                           flagged so a mixed page (some assets
+//                           per-language, some shared) stays visible
+//                           instead of silently passing through either way.
+function resolveMediaSrc(src, code, mediaMode, flagsOut, langCode) {
+  if (mediaMode === "dont-localize") return src;
+  if (src.includes("_EN.")) {
+    return src.replace("_EN.", `_${code}.`);
+  }
+  if (mediaMode === "localize-if-suffix") {
+    flagsOut.push(
+      `${langCode}: media file "${src}" has no "_EN." naming pattern — left as-is (mode: localize only if suffix exists).`
+    );
+  }
+  return src;
+}
+
+async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLinks, mediaInsertions, flagsOut, mediaMode = "localize") {
   const enParagraphCount = enStyleRuns.reduce((max, r) => Math.max(max, r.end), 0) + 1;
   const directMapping = targetParagraphTexts.length === enParagraphCount;
 
@@ -428,7 +498,7 @@ async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLi
     const blocks = [];
     while (mediaCursor < sortedMedia.length && sortedMedia[mediaCursor].targetIndex <= paragraphIndex) {
       const m = sortedMedia[mediaCursor];
-      const swappedSrc = m.src.replace("_EN.", `_${code}.`);
+      const swappedSrc = resolveMediaSrc(m.src, code, mediaMode, flagsOut, code);
       // split/join instead of replace() since src typically also appears
       // in an alt="" attribute and both should be swapped.
       const html = m.src ? m.outerHTML.split(m.src).join(swappedSrc) : m.outerHTML;
@@ -463,11 +533,11 @@ async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLi
 
 // ---------- Top-level orchestration ----------
 
-async function runPipeline(enSourcecode, workbookArrayBuffer, sheetName, onProgress) {
+async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, mediaMode = "localize") {
   const lookup = await loadLanguageLookup();
   const mutationMap = buildMutationMap(lookup);
 
-  const wb = readWorkbook(workbookArrayBuffer);
+  const wb = readWorkbook(workbookSource);
   const sheet = wb.Sheets[sheetName || wb.SheetNames[0]];
   const rows = sheetToRows(sheet);
   const headerRow = rows[0];
@@ -560,7 +630,8 @@ async function runPipeline(enSourcecode, workbookArrayBuffer, sheetName, onProgr
       enStyleRuns,
       enLinks,
       mediaInsertions,
-      flags
+      flags,
+      mediaMode
     );
 
     // Each block is already a complete <p>...</p> or media element;
@@ -575,6 +646,8 @@ async function runPipeline(enSourcecode, workbookArrayBuffer, sheetName, onProgr
 
 window.wiki14 = {
   runPipeline,
+  parseGoogleSheetsUrl,
+  fetchGoogleSheetCsv,
   // Exposed for debugging/testing in the browser console.
   _internal: { tokenizeSourcecode, flattenTokens, buildStructure, paragraphStyleKeys, collapseStyleRuns, paragraphPlainText },
 };

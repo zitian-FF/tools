@@ -1,10 +1,21 @@
-// wiki14 Gemini proxy — Cloudflare Worker
+// wiki14 Gemini proxy + Google Sheets fetch — Cloudflare Worker
 //
-// This worker does exactly one job: when the static site's deterministic
-// paragraph-matching can't align a translated paragraph range to an EN
-// styled section (paragraph counts don't match), it asks Gemini to resolve
-// the range and hands back JSON. The Gemini API key lives only here, as a
-// Worker secret — it is never sent to or visible in the browser.
+// Two routes:
+//   /resolve-styles (also served at the bare root "/" for backwards
+//   compatibility with callers deployed before this route existed): when
+//   the static site's deterministic paragraph-matching can't align a
+//   translated paragraph range to an EN styled section (paragraph counts
+//   don't match), asks Gemini to resolve the range and hands back JSON.
+//   The Gemini API key lives only here, as a Worker secret — it is never
+//   sent to or visible in the browser.
+//
+//   /fetch-sheet: fetches a Google Sheet's CSV export server-side, since
+//   Google's export endpoint doesn't reliably send CORS headers for a
+//   direct browser fetch. Requires the same x-app-token as the resolve
+//   route. Detects when Google hands back a login/"request access" HTML
+//   page instead of CSV (it doesn't cleanly 403 a private sheet) and
+//   reports that as a clear sharing-settings error instead of returning
+//   the HTML as if it were data.
 //
 // Deploy:
 //   wrangler secret put GEMINI_API_KEY
@@ -49,71 +60,132 @@ export default {
 
     // Not a real secret (it ships inside the public site's JS) — just a
     // speed bump so a stranger who stumbles on this URL can't casually
-    // burn your Gemini quota. Pair with Cloudflare rate-limiting rules if
-    // this ever becomes a real concern.
+    // burn your Gemini quota or fetch-sheet allowance. Pair with
+    // Cloudflare rate-limiting rules if this ever becomes a real concern.
     if (request.headers.get("x-app-token") !== env.APP_TOKEN) {
       return withCors(new Response("Unauthorized", { status: 401 }));
     }
 
-    let payload;
-    try {
-      payload = await request.json();
-    } catch {
-      return withCors(new Response("Invalid JSON body", { status: 400 }));
+    const { pathname } = new URL(request.url);
+    if (pathname === "/fetch-sheet") {
+      return handleFetchSheet(request);
     }
-
-    const { style_runs, target_paragraphs } = payload;
-    if (!Array.isArray(style_runs) || !Array.isArray(target_paragraphs)) {
-      return withCors(
-        jsonResponse({ error: "Missing style_runs or target_paragraphs" }, 400)
-      );
-    }
-
-    const prompt = buildPrompt(style_runs, target_paragraphs);
-
-    let geminiResp;
-    try {
-      geminiResp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": env.GEMINI_API_KEY,
-          },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              responseMimeType: "application/json",
-              responseSchema: RESPONSE_SCHEMA,
-              temperature: 0,
-            },
-          }),
-        }
-      );
-    } catch (e) {
-      return withCors(jsonResponse({ error: "Network error calling Gemini", detail: String(e) }, 502));
-    }
-
-    if (!geminiResp.ok) {
-      const detail = await geminiResp.text();
-      return withCors(jsonResponse({ error: "Gemini request failed", detail }, 502));
-    }
-
-    const geminiData = await geminiResp.json();
-    let matches;
-    try {
-      const rawText = geminiData.candidates[0].content.parts[0].text;
-      matches = JSON.parse(rawText);
-    } catch (e) {
-      return withCors(
-        jsonResponse({ error: "Could not parse Gemini response", detail: String(e) }, 502)
-      );
-    }
-
-    return withCors(jsonResponse(matches, 200));
+    // "/resolve-styles" is the explicit path going forward; the bare root
+    // "/" is kept working for any caller still deployed before this split.
+    return handleResolveStyles(request, env);
   },
 };
+
+async function handleResolveStyles(request, env) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return withCors(new Response("Invalid JSON body", { status: 400 }));
+  }
+
+  const { style_runs, target_paragraphs } = payload;
+  if (!Array.isArray(style_runs) || !Array.isArray(target_paragraphs)) {
+    return withCors(
+      jsonResponse({ error: "Missing style_runs or target_paragraphs" }, 400)
+    );
+  }
+
+  const prompt = buildPrompt(style_runs, target_paragraphs);
+
+  let geminiResp;
+  try {
+    geminiResp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": env.GEMINI_API_KEY,
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: RESPONSE_SCHEMA,
+            temperature: 0,
+          },
+        }),
+      }
+    );
+  } catch (e) {
+    return withCors(jsonResponse({ error: "Network error calling Gemini", detail: String(e) }, 502));
+  }
+
+  if (!geminiResp.ok) {
+    const detail = await geminiResp.text();
+    return withCors(jsonResponse({ error: "Gemini request failed", detail }, 502));
+  }
+
+  const geminiData = await geminiResp.json();
+  let matches;
+  try {
+    const rawText = geminiData.candidates[0].content.parts[0].text;
+    matches = JSON.parse(rawText);
+  } catch (e) {
+    return withCors(
+      jsonResponse({ error: "Could not parse Gemini response", detail: String(e) }, 502)
+    );
+  }
+
+  return withCors(jsonResponse(matches, 200));
+}
+
+async function handleFetchSheet(request) {
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return withCors(jsonResponse({ error: "Invalid JSON body" }, 400));
+  }
+
+  const { sheetId, gid } = payload;
+  if (!sheetId) {
+    return withCors(jsonResponse({ error: "Missing sheetId" }, 400));
+  }
+
+  const exportUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid || "0"}`;
+
+  let sheetResp;
+  try {
+    sheetResp = await fetch(exportUrl);
+  } catch (e) {
+    return withCors(jsonResponse({ error: "Network error fetching the sheet", detail: String(e) }, 502));
+  }
+
+  const contentType = sheetResp.headers.get("content-type") || "";
+  const body = await sheetResp.text();
+
+  // Google doesn't cleanly 403 a private/restricted sheet — it redirects to
+  // a login or "request access" HTML page instead (often with a 200
+  // status). Detect that rather than silently handing back HTML as if it
+  // were CSV.
+  const trimmedBody = body.trimStart();
+  const looksLikeHtml =
+    contentType.includes("text/html") ||
+    trimmedBody.startsWith("<!DOCTYPE") ||
+    trimmedBody.startsWith("<html");
+
+  if (!sheetResp.ok || looksLikeHtml) {
+    return withCors(
+      jsonResponse(
+        {
+          error:
+            'Could not load that sheet as CSV — it likely isn\'t shared as "Anyone with the link ' +
+            'can view." Check the sheet\'s sharing settings, or use file upload instead.',
+        },
+        403
+      )
+    );
+  }
+
+  return withCors(jsonResponse({ csv: body }, 200));
+}
 
 function buildPrompt(styleRuns, targetParagraphs) {
   return `You are matching styled sections of a wiki page from an English source to its translation in another language.

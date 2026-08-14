@@ -26,20 +26,16 @@ global.fetch = async (url, opts) => {
     const data = fs.readFileSync(path.join(__dirname, "..", "wiki_styler", "language-lookup.json"), "utf-8");
     return { json: async () => JSON.parse(data) };
   }
-  if (url === WORKER_URL) {
+  if (url === `${WORKER_URL}/resolve-styles`) {
     // Simulate the Gemini proxy using ground truth we hand-derived for
-    // Korean earlier in this conversation, just to exercise the fallback
-    // code path end-to-end without a real network call.
+    // Korean earlier in this project, just to exercise the fallback code
+    // path end-to-end without a real network call.
     const body = JSON.parse(opts.body);
-    console.log("  [mock gemini call] style_runs:", JSON.stringify(body.style_runs));
-    console.log("  [mock gemini call] target_paragraphs count:", body.target_paragraphs.length);
-    // Map by style run start index (0-based EN paragraph index) since we
-    // know this doc's structure from the earlier manual analysis.
-    const byStart = {};
-    for (const r of body.style_runs) byStart[r.start] = r.style;
+    console.log("  [mock resolve-styles call] style_runs:", JSON.stringify(body.style_runs));
+    console.log("  [mock resolve-styles call] target_paragraphs count:", body.target_paragraphs.length);
     const matches = body.style_runs.map((r) => {
       // Known-correct Korean paragraph ranges from the manual analysis
-      // earlier in this conversation.
+      // earlier in this project (title/red/orange/purple spans).
       if (r.start === 0) return { style: r.style, start: 0, end: 0, confidence: "high" };
       if (r.start === 3) return { style: r.style, start: 3, end: 6, confidence: "high" };
       if (r.start === 6) return { style: r.style, start: 7, end: 9, confidence: "high" };
@@ -47,6 +43,11 @@ global.fetch = async (url, opts) => {
       return { style: r.style, start: r.start, end: r.end, confidence: "low" };
     });
     return { ok: true, json: async () => ({ matches }) };
+  }
+  if (url === `${WORKER_URL}/fetch-sheet`) {
+    // Not exercised by this test run — it uses the local xlsx fixture, not
+    // a Sheets URL. A real call here would indicate a wiring bug.
+    throw new Error("unexpected /fetch-sheet call in this test run");
   }
   throw new Error("unexpected fetch: " + url);
 };
@@ -59,13 +60,21 @@ const enSourcecode = fs.readFileSync(path.join(__dirname, "en_source.html"), "ut
 const excelBuffer = fs.readFileSync(path.join(__dirname, "test_excel.xlsx"));
 const arrayBuffer = excelBuffer.buffer.slice(excelBuffer.byteOffset, excelBuffer.byteOffset + excelBuffer.byteLength);
 
+const EXPECTED_KR_STYLES = [
+  "font-size: 24px",
+  "color: rgb(255, 0, 0)",
+  "color: rgb(255, 192, 0)",
+  "color: rgb(115, 52, 197)",
+];
+
 (async () => {
   try {
     const { outputs, flags } = await window.wiki14.runPipeline(
       enSourcecode,
-      arrayBuffer,
+      { type: "arraybuffer", data: arrayBuffer },
       "Player Story 8.13",
-      (msg) => console.log("progress:", msg)
+      (msg) => console.log("progress:", msg),
+      "localize"
     );
     console.log("\n=== FLAGS ===");
     console.log(flags.length ? flags.join("\n") : "(none)");
@@ -78,6 +87,54 @@ const arrayBuffer = excelBuffer.buffer.slice(excelBuffer.byteOffset, excelBuffer
 
     fs.writeFileSync(path.join(__dirname, "test_output.json"), JSON.stringify(outputs, null, 2));
     console.log("\nWrote test_output.json");
+
+    const allLanguagesGenerated = Object.keys(outputs).length === 13;
+    const zeroFlags = flags.length === 0;
+    const krHasAllStyles = EXPECTED_KR_STYLES.every((s) => outputs.KR.includes(s));
+
+    console.log("\n=== CHECKS ===");
+    console.log("ALL 13 LANGUAGES GENERATED:", allLanguagesGenerated);
+    console.log("ZERO FLAGS:", zeroFlags);
+    console.log("KR HAS ALL 4 STYLE SPANS:", krHasAllStyles);
+    if (!krHasAllStyles) {
+      EXPECTED_KR_STYLES.forEach((s) => {
+        console.log(`  "${s}" present:`, outputs.KR.includes(s));
+      });
+    }
+
+    if (!allLanguagesGenerated || !zeroFlags || !krHasAllStyles) {
+      console.error("\nFAIL: one or more checks did not pass.");
+      process.exit(1);
+    }
+
+    // Second manual check: mediaMode = "dont-localize" should leave every
+    // language's image src exactly as EN, never swapped per language.
+    console.log("\n=== dont-localize mode check ===");
+    const dontLocalizeResult = await window.wiki14.runPipeline(
+      enSourcecode,
+      { type: "arraybuffer", data: arrayBuffer },
+      "Player Story 8.13",
+      () => {},
+      "dont-localize"
+    );
+    let allUnchanged = true;
+    for (const [langCode, html] of Object.entries(dontLocalizeResult.outputs)) {
+      const hasEnFilename = html.includes("_EN.png");
+      const hasSwappedFilename = html.includes(`_${langCode}.png`);
+      if (!hasEnFilename || hasSwappedFilename) {
+        allUnchanged = false;
+        console.error(
+          `  ${langCode}: FAIL — expected unchanged "_EN.png" (hasEnFilename=${hasEnFilename}, hasSwappedFilename=${hasSwappedFilename})`
+        );
+      }
+    }
+    console.log("ALL LANGUAGES KEEP _EN.png UNCHANGED (dont-localize):", allUnchanged);
+    if (!allUnchanged) {
+      console.error("\nFAIL: dont-localize mode check failed.");
+      process.exit(1);
+    }
+
+    console.log("\nALL CHECKS PASSED.");
   } catch (e) {
     console.error("PIPELINE ERROR:", e.message);
     console.error(e.stack);

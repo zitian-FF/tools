@@ -31,11 +31,47 @@
     </section>
 
     <section class="field">
-      <label for="excel-file">Translation sheet (.xlsx / .xls / .csv)</label>
-      <input type="file" id="excel-file" accept=".xlsx,.xls,.csv" />
-      <div id="sheet-picker" class="hidden">
-        <label for="sheet-select">Sheet</label>
-        <select id="sheet-select"></select>
+      <label>Translation sheet</label>
+      <div class="source-tabs">
+        <button type="button" id="source-tab-file" class="source-tab active" data-source="file">Upload file</button>
+        <button type="button" id="source-tab-sheets" class="source-tab" data-source="sheets">Google Sheets URL</button>
+      </div>
+
+      <div id="file-source-panel" class="source-panel">
+        <input type="file" id="excel-file" accept=".xlsx,.xls,.csv" />
+        <div id="sheet-picker" class="hidden">
+          <label for="sheet-select">Sheet</label>
+          <select id="sheet-select"></select>
+        </div>
+      </div>
+
+      <div id="sheets-source-panel" class="source-panel hidden">
+        <input type="text" id="sheets-url" placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=..." />
+        <p class="hint">
+          Loads whichever tab's <code>gid</code> is in the URL — copy the URL while the
+          tab you want is the one open in your browser, not just the sheet's default
+          view. The sheet must be shared as "Anyone with the link can view".
+        </p>
+        <button type="button" id="load-sheet-button" class="secondary-button">Load sheet</button>
+        <div id="sheets-status" class="status hidden"></div>
+      </div>
+    </section>
+
+    <section class="field">
+      <label>Media (image/video) filename localization</label>
+      <div class="media-mode-options">
+        <label class="radio-option">
+          <input type="radio" name="media-mode" value="localize" checked />
+          Localize (swap _EN → language code on every file)
+        </label>
+        <label class="radio-option">
+          <input type="radio" name="media-mode" value="localize-if-suffix" />
+          Localize only if suffix exists (flag files that don't match)
+        </label>
+        <label class="radio-option">
+          <input type="radio" name="media-mode" value="dont-localize" />
+          Don't localize (keep the same file for every language)
+        </label>
       </div>
     </section>
 
