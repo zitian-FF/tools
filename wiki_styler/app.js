@@ -61,11 +61,21 @@ function tokenizeSourcecode(html) {
   const doc = new DOMParser().parseFromString(`<div id="root">${html}</div>`, "text/html");
   const root = doc.getElementById("root");
   const tokens = [];
+  let nextTagInstanceId = 0;
 
   function styleKeyFor(stack) {
     return stack
       .map((s) => (s.attr ? `${s.tag}[${s.attr}]` : s.tag))
       .join(">");
+  }
+  // Identifies WHICH specific tag instance in the source a run came from,
+  // not just what it looks like. Two adjacent lines can have identical
+  // styleKeys ("bold") while coming from two separately-authored
+  // <strong>...</strong> elements rather than one continuous one — merging
+  // those when reassembling would silently change the source structure
+  // even though it renders identically in a browser.
+  function instanceKeyFor(stack) {
+    return stack.map((s) => s.instanceId).join(">");
   }
   function openTagsFor(stack) {
     return stack.map((s) => s.openTag).join("");
@@ -83,6 +93,7 @@ function tokenizeSourcecode(html) {
           type: "text",
           text,
           styleKey: styleKeyFor(stack),
+          instanceKey: instanceKeyFor(stack),
           openTag: openTagsFor(stack),
           closeTag: closeTagsFor(stack),
           linkHref: linkHref || null,
@@ -125,10 +136,22 @@ function tokenizeSourcecode(html) {
           walk(child, stack, child.getAttribute("href") || "");
         } else if (tag === "span") {
           const style = child.getAttribute("style") || "";
-          const entry = { tag: "span", attr: style, openTag: `<span style="${style}">`, closeTag: "</span>" };
+          const entry = {
+            tag: "span",
+            attr: style,
+            instanceId: nextTagInstanceId++,
+            openTag: `<span style="${style}">`,
+            closeTag: "</span>",
+          };
           walk(child, [...stack, entry], linkHref);
         } else if (tag === "strong" || tag === "s" || tag === "em" || tag === "u") {
-          const entry = { tag, attr: null, openTag: `<${tag}>`, closeTag: `</${tag}>` };
+          const entry = {
+            tag,
+            attr: null,
+            instanceId: nextTagInstanceId++,
+            openTag: `<${tag}>`,
+            closeTag: `</${tag}>`,
+          };
           walk(child, [...stack, entry], linkHref);
         } else {
           // Unknown tag: descend without adding to the style stack, so we
@@ -157,7 +180,7 @@ function flattenTokens(tokens) {
 }
 
 function buildStructure(tokens) {
-  const paragraphs = []; // array of lines; each line = array of {text, styleKey, openTag, closeTag, linkHref}
+  const paragraphs = []; // array of lines; each line = array of {text, styleKey, instanceKey, openTag, closeTag, linkHref}
   const mediaInsertions = []; // {beforeParagraphIndex, outerHTML, src}
   let currentParagraph = [];
   let currentLine = [];
@@ -222,11 +245,78 @@ function buildStructure(tokens) {
   return { paragraphs: filteredParagraphs, mediaInsertions: remappedMedia };
 }
 
-// Per-paragraph style: the styleKey shared by every line/run in that
-// paragraph, if uniform; otherwise null (mixed / mid-sentence styling,
+// Flattens paragraphs -> lines into one ordered flat array, so row-mapping
+// and style-run collapsing can operate at line granularity while each
+// entry still knows which paragraph (and position within it) it came from.
+function flattenToLines(paragraphs) {
+  const flatLines = [];
+  paragraphs.forEach((lines, paragraphIndex) => {
+    lines.forEach((runs, lineIndexInParagraph) => {
+      flatLines.push({ paragraphIndex, lineIndexInParagraph, runs });
+    });
+  });
+  return flatLines;
+}
+
+// Per-line style: the styleKey/instanceKey shared by every run on that
+// line, if uniform; otherwise null (genuine mid-line / sub-phrase styling,
 // which this tool doesn't attempt to auto-resolve).
-function paragraphStyleKeys(paragraphs) {
-  return paragraphs.map((lines) => {
+function lineStyleKeys(flatLines) {
+  return flatLines.map((line) => {
+    const keys = new Set();
+    let sample = null;
+    for (const run of line.runs) {
+      keys.add(run.styleKey);
+      if (!sample) sample = run;
+    }
+    if (keys.size <= 1) {
+      return {
+        uniform: true,
+        styleKey: sample ? sample.styleKey : "",
+        instanceKey: sample ? sample.instanceKey : "",
+        openTag: sample ? sample.openTag : "",
+        closeTag: sample ? sample.closeTag : "",
+      };
+    }
+    return { uniform: false, styleKey: null };
+  });
+}
+
+// Collapse consecutive items (lines or paragraphs, whatever index space
+// the caller passes) sharing the same styleKey AND the same instanceKey
+// into runs — instanceKey is required too so two separately-authored
+// same-looking tags never get merged into one continuous tag just because
+// they describe the same style.
+function collapseStyleRuns(itemStyles) {
+  const runs = [];
+  let i = 0;
+  while (i < itemStyles.length) {
+    const cur = itemStyles[i];
+    let j = i;
+    while (
+      j + 1 < itemStyles.length &&
+      itemStyles[j + 1].styleKey === cur.styleKey &&
+      itemStyles[j + 1].instanceKey === cur.instanceKey &&
+      cur.uniform
+    ) {
+      j++;
+    }
+    runs.push({ styleKey: cur.styleKey, openTag: cur.openTag, closeTag: cur.closeTag, start: i, end: j });
+    i = j + 1;
+  }
+  return runs;
+}
+
+// Paragraph-level style info kept specifically for the Gemini-fallback
+// path, which still resolves at paragraph granularity. A paragraph mixing
+// multiple line-level styles (e.g. a bold header line directly followed by
+// a plain body line, both within the same paragraph) is a normal case now
+// — line-level tracking (lineStyleKeys) handles it directly — so this no
+// longer throws; it's marked with a unique-per-paragraph "__mixed_N__"
+// placeholder key so mixed paragraphs never accidentally collapse into a
+// run with each other or with anything else.
+function paragraphStyleFromLines(paragraphs) {
+  return paragraphs.map((lines, paragraphIndex) => {
     const keys = new Set();
     let sample = null;
     for (const line of lines) {
@@ -235,26 +325,22 @@ function paragraphStyleKeys(paragraphs) {
         if (!sample) sample = run;
       }
     }
-    if (keys.size === 1) return { uniform: true, styleKey: sample.styleKey, openTag: sample.openTag, closeTag: sample.closeTag };
-    return { uniform: false, styleKey: null };
+    if (keys.size <= 1) {
+      return {
+        uniform: true,
+        styleKey: sample ? sample.styleKey : "",
+        instanceKey: sample ? sample.instanceKey : "",
+        openTag: sample ? sample.openTag : "",
+        closeTag: sample ? sample.closeTag : "",
+      };
+    }
+    const placeholder = `__mixed_${paragraphIndex}__`;
+    return { uniform: false, styleKey: placeholder, instanceKey: placeholder, openTag: "", closeTag: "", mixed: true };
   });
 }
 
-// Collapse consecutive paragraphs sharing the same styleKey into runs, e.g.
-// paragraphs [3,4,5] all "red" become one run {styleKey:"red", start:3, end:5}.
-function collapseStyleRuns(paraStyles) {
-  const runs = [];
-  let i = 0;
-  while (i < paraStyles.length) {
-    const cur = paraStyles[i];
-    let j = i;
-    while (j + 1 < paraStyles.length && paraStyles[j + 1].styleKey === cur.styleKey && cur.uniform) {
-      j++;
-    }
-    runs.push({ styleKey: cur.styleKey, openTag: cur.openTag, closeTag: cur.closeTag, start: i, end: j });
-    i = j + 1;
-  }
-  return runs;
+function isMixedStyleKey(styleKey) {
+  return typeof styleKey === "string" && styleKey.startsWith("__mixed_");
 }
 
 function paragraphPlainText(lines) {
@@ -338,7 +424,7 @@ function normalizeForMatch(s) {
   return s
     .replace(/\r\n|\r/g, "\n")
     .replace(/[–—]/g, "-")
-    .replace(/\u00a0/g, " ")
+    .replace(/ /g, " ")
     .replace(/[“”"'‘’]/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -349,12 +435,12 @@ function normalizeForMatch(s) {
 // than collapsing it. Paragraph/line-break position is exactly the thing
 // that can legitimately differ between the sourcecode and Excel without
 // being a real content difference (that's the whole reason offset-based
-// row-to-paragraph mapping exists below) — so comparisons that care about
+// row-to-line mapping exists below) — so comparisons that care about
 // content identity, not layout, need whitespace out of the way entirely.
 function stripAllWhitespace(s) {
   return s
     .replace(/[–—]/g, "-")
-    .replace(/[\u201c\u201d"'\u2018\u2019]/g, "")
+    .replace(/[“”"'‘’]/g, "")
     .replace(/\s+/g, "");
 }
 
@@ -363,8 +449,8 @@ function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
   // inside the flattened sourcecode text. This naturally excludes checker
   // names, proofread checkboxes, and blank rows without needing to know
   // the sheet's specific column layout. Rows with EN text that don't match
-  // are returned too (excludedRows) so a paragraph-count mismatch later can
-  // point at exactly which row is the likely culprit instead of just two
+  // are returned too (excludedRows) so a content mismatch later can point
+  // at exactly which row is the likely culprit instead of just two
   // numbers.
   const normalizedFlat = normalizeForMatch(enFlatFromSourcecode);
   const contentRowIndices = [];
@@ -381,7 +467,7 @@ function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
   return { contentRowIndices, excludedRows };
 }
 
-// Maps each matched Excel row (in order) to the span of EN paragraphs its
+// Maps each matched Excel row (in order) to the span of EN flat-lines its
 // content falls within, using cumulative whitespace-stripped content
 // length rather than any assumption about what character (if any)
 // separates two adjacent rows in the sourcecode — that separator is a
@@ -389,21 +475,23 @@ function identifyContentRows(rows, enColIdx, enFlatFromSourcecode) {
 // within one shared paragraph, a real blank line, or nothing at all across
 // a bare block boundary), not a property of the rows themselves, so no
 // fixed delimiter is ever correct across different pages. Throws if the
-// rows' total stripped content length doesn't exactly equal the EN
-// paragraphs' total stripped content length — a genuine content
-// difference (a missing/extra word or sentence), not just formatting.
-// Returns [{row, firstParaIdx, lastParaIdx, coreLen}, ...] per content row.
-function mapRowsToParagraphs(contentRowIndices, rows, colIdx, enParagraphTexts, rowLabelForError) {
-  const paraLens = enParagraphTexts.map((t) => stripAllWhitespace(t).length);
-  const paraCumulative = [0];
-  for (const len of paraLens) paraCumulative.push(paraCumulative[paraCumulative.length - 1] + len);
-  const totalLen = paraCumulative[paraCumulative.length - 1];
+// rows' total stripped content length doesn't exactly equal the EN lines'
+// total stripped content length — a genuine content difference (a
+// missing/extra word or sentence), not just formatting.
+// Returns [{row, firstLineIdx, lastLineIdx, firstParaIdx, lastParaIdx, coreLen}, ...]
+// per content row.
+function mapRowsToLines(contentRowIndices, rows, colIdx, enFlatLines, rowLabelForError) {
+  const lineTexts = enFlatLines.map((l) => l.runs.map((r) => r.text).join(""));
+  const lineLens = lineTexts.map((t) => stripAllWhitespace(t).length);
+  const lineCumulative = [0];
+  for (const len of lineLens) lineCumulative.push(lineCumulative[lineCumulative.length - 1] + len);
+  const totalLen = lineCumulative[lineCumulative.length - 1];
 
-  function paragraphIndexForOffset(offset) {
-    for (let i = 0; i < enParagraphTexts.length; i++) {
-      if (offset >= paraCumulative[i] && offset < paraCumulative[i + 1]) return i;
+  function lineIndexForOffset(offset) {
+    for (let i = 0; i < enFlatLines.length; i++) {
+      if (offset >= lineCumulative[i] && offset < lineCumulative[i + 1]) return i;
     }
-    return enParagraphTexts.length - 1;
+    return enFlatLines.length - 1;
   }
 
   const rowSpans = [];
@@ -413,16 +501,23 @@ function mapRowsToParagraphs(contentRowIndices, rows, colIdx, enParagraphTexts, 
     const coreLen = stripAllWhitespace(rowText).length;
     const startOffset = cursor;
     const endOffsetExclusive = cursor + coreLen;
-    const firstParaIdx = paragraphIndexForOffset(startOffset);
-    const lastParaIdx = coreLen > 0 ? paragraphIndexForOffset(endOffsetExclusive - 1) : firstParaIdx;
-    rowSpans.push({ row: r, firstParaIdx, lastParaIdx, coreLen });
+    const firstLineIdx = lineIndexForOffset(startOffset);
+    const lastLineIdx = coreLen > 0 ? lineIndexForOffset(endOffsetExclusive - 1) : firstLineIdx;
+    rowSpans.push({
+      row: r,
+      firstLineIdx,
+      lastLineIdx,
+      firstParaIdx: enFlatLines[firstLineIdx].paragraphIndex,
+      lastParaIdx: enFlatLines[lastLineIdx].paragraphIndex,
+      coreLen,
+    });
     cursor = endOffsetExclusive;
   }
 
   if (cursor !== totalLen) {
     throw new Error(
       `${rowLabelForError} content length mismatch: the matched Excel rows' combined content is ${cursor} ` +
-        `characters (ignoring whitespace/quotes/dash style) but the sourcecode's parsed paragraphs total ${totalLen}. ` +
+        `characters (ignoring whitespace/quotes/dash style) but the sourcecode's parsed lines total ${totalLen}. ` +
         "This is a genuine content difference (e.g. a missing or extra word/sentence), not just formatting."
     );
   }
@@ -445,47 +540,71 @@ function computeRowTransitionMerges(rowSpans) {
   return merges;
 }
 
-// Builds one language's paragraph-text list directly from its own rows'
-// raw text — no cross-row delimiter guessing, since each row's internal
-// "\n\n" split is always reliable (a single cell, not spanning rows).
-// rowTransitionMerges (from the EN-only mapping) says whether the
+// Builds one language's paragraph/line structure directly from its own
+// rows' raw text — no cross-row delimiter guessing, since each row's
+// internal "\n\n" split is always reliable (a single cell, not spanning
+// rows). rowTransitionMerges (from the EN-only mapping) says whether the
 // transition INTO each row continues the previous row's last paragraph or
-// starts fresh.
-function buildParagraphTextsFromRows(contentRowIndices, rows, colIdx, rowTransitionMerges) {
-  const paragraphTexts = [];
-  let accumulator = null; // pending paragraph text, open across a merged row boundary
+// starts fresh. Returns an array of paragraphs, each an array of
+// {text, row} line objects (row = which Excel row produced that line).
+function buildLineStructureFromRows(contentRowIndices, rows, colIdx, rowTransitionMerges) {
+  const paragraphs = [];
+  let accumulator = null; // pending paragraph (array of {text, row} lines), open across a merged row boundary
+
+  function linesOf(text, row) {
+    return text.split("\n").map((t) => ({ text: t, row }));
+  }
 
   contentRowIndices.forEach((r, i) => {
     const rowText = String(rows[r][colIdx] == null ? "" : rows[r][colIdx]);
     const subParas = rowText.split("\n\n");
     const mergeIntoThisRow = i > 0 && rowTransitionMerges[i - 1];
+    const firstSubParaLines = linesOf(subParas[0], r);
 
     if (mergeIntoThisRow && accumulator !== null) {
-      accumulator += "\n" + subParas[0];
+      accumulator.push(...firstSubParaLines);
     } else {
-      if (accumulator !== null) paragraphTexts.push(accumulator);
-      accumulator = subParas[0];
+      if (accumulator !== null) paragraphs.push(accumulator);
+      accumulator = [...firstSubParaLines];
     }
 
     // Sub-paragraphs strictly between this row's first and last are
     // complete standalone paragraphs — nothing before or after them in
     // this row shares them.
     for (let k = 1; k < subParas.length - 1; k++) {
-      paragraphTexts.push(accumulator);
-      accumulator = subParas[k];
+      paragraphs.push(accumulator);
+      accumulator = linesOf(subParas[k], r);
     }
 
     // The row's last sub-paragraph becomes the new pending accumulator,
     // staying open in case the next row's transition merges into it.
     if (subParas.length > 1) {
-      paragraphTexts.push(accumulator);
-      accumulator = subParas[subParas.length - 1];
+      paragraphs.push(accumulator);
+      accumulator = linesOf(subParas[subParas.length - 1], r);
     }
   });
 
-  if (accumulator !== null) paragraphTexts.push(accumulator);
+  if (accumulator !== null) paragraphs.push(accumulator);
 
-  return paragraphTexts;
+  return paragraphs;
+}
+
+function paragraphsShape(paragraphs) {
+  return paragraphs.map((p) => p.length);
+}
+
+function shapesMatch(shapeA, shapeB) {
+  if (shapeA.length !== shapeB.length) return false;
+  for (let i = 0; i < shapeA.length; i++) {
+    if (shapeA[i] !== shapeB[i]) return false;
+  }
+  return true;
+}
+
+// For feeding the paragraph-level fallback path its expected
+// plain-string-per-paragraph input.
+function joinLinesToPlainText(paragraphs) {
+  return paragraphs.map((lines) => lines.map((l) => l.text).join("\n"));
 }
 
 // ---------- Gemini fallback ----------
@@ -562,7 +681,116 @@ function resolveMediaSrc(src, code, mediaMode, flagsOut, langCode) {
   return src;
 }
 
-async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLinks, mediaInsertions, flagsOut, mediaMode = "localize") {
+// Used when a target language's shape (paragraph count AND every
+// paragraph's own line count) matches EN's exactly — applies EN's
+// per-line style runs directly by flat-line-index, no Gemini call.
+//
+// Processes lines in a single sequential pass (not paragraph-outer/
+// segment-inner, and not segment-outer either — both were tried and both
+// had real bugs). This is what correctly handles both: (a) one continuous
+// style run legitimately spanning multiple paragraphs (open/close the tag
+// exactly once, with "<br><br>" inserted inside it at the paragraph
+// boundary), and (b) media sitting between two paragraphs that are part of
+// the same otherwise-continuous style run (splits the tag around the media
+// correctly — a tag can't wrap a block-level media element in the middle,
+// so the style continuing after the media gets a fresh tag instance).
+function buildLanguageOutputDirect(code, targetFlatLineTexts, enFlatLines, enLineStyleRuns, enLinks, mediaInsertions, mediaMode, flagsOut) {
+  const segments = [];
+  let cursor = 0;
+  for (const run of enLineStyleRuns) {
+    if (run.start > cursor) {
+      segments.push({ styleKey: "", openTag: "", closeTag: "", start: cursor, end: run.start - 1 });
+    }
+    segments.push(run);
+    cursor = run.end + 1;
+  }
+  if (cursor < targetFlatLineTexts.length) {
+    segments.push({ styleKey: "", openTag: "", closeTag: "", start: cursor, end: targetFlatLineTexts.length - 1 });
+  }
+
+  const segmentForLine = new Array(targetFlatLineTexts.length);
+  segments.forEach((seg, segIdx) => {
+    for (let i = seg.start; i <= seg.end; i++) segmentForLine[i] = segIdx;
+  });
+
+  const totalParagraphCount = enFlatLines.length > 0 ? enFlatLines[enFlatLines.length - 1].paragraphIndex + 1 : 0;
+
+  const sortedMedia = [...mediaInsertions].sort((a, b) => a.beforeParagraphIndex - b.beforeParagraphIndex);
+  let mediaCursor = 0;
+
+  function mediaBlocksBefore(paragraphIndex) {
+    const blocks = [];
+    while (mediaCursor < sortedMedia.length && sortedMedia[mediaCursor].beforeParagraphIndex <= paragraphIndex) {
+      const m = sortedMedia[mediaCursor];
+      const swappedSrc = resolveMediaSrc(m.src, code, mediaMode, flagsOut, code);
+      const html = m.src ? m.outerHTML.split(m.src).join(swappedSrc) : m.outerHTML;
+      blocks.push({ type: "media", html });
+      mediaCursor++;
+    }
+    return blocks;
+  }
+
+  const blocks = [];
+  let currentPParts = "";
+  let openSegIdx = null;
+  let prevLineIdx = null;
+
+  function closeOpenTag() {
+    if (openSegIdx !== null) {
+      currentPParts += segments[openSegIdx].closeTag;
+      openSegIdx = null;
+    }
+  }
+
+  function flushP() {
+    closeOpenTag();
+    if (currentPParts.length > 0) {
+      blocks.push({ type: "p", html: `<p>${currentPParts}</p>` });
+    }
+    currentPParts = "";
+  }
+
+  for (let i = 0; i < targetFlatLineTexts.length; i++) {
+    const paragraphIndex = enFlatLines[i].paragraphIndex;
+    const isFirstLineOfParagraph = enFlatLines[i].lineIndexInParagraph === 0;
+
+    if (isFirstLineOfParagraph) {
+      const media = mediaBlocksBefore(paragraphIndex);
+      if (media.length > 0) {
+        flushP();
+        blocks.push(...media);
+        prevLineIdx = null;
+      }
+    }
+
+    const segIdx = segmentForLine[i];
+    const sameParagraphAsPrev = prevLineIdx !== null && enFlatLines[prevLineIdx].paragraphIndex === paragraphIndex;
+    const separator = prevLineIdx === null ? "" : sameParagraphAsPrev ? "<br>" : "<br><br>";
+
+    if (segIdx !== openSegIdx) {
+      closeOpenTag();
+      currentPParts += separator + segments[segIdx].openTag;
+      openSegIdx = segIdx;
+    } else {
+      currentPParts += separator;
+    }
+
+    currentPParts += linkify(targetFlatLineTexts[i], enLinks);
+    prevLineIdx = i;
+  }
+
+  flushP();
+  blocks.push(...mediaBlocksBefore(totalParagraphCount));
+
+  return blocks;
+}
+
+// Used when a target language's shape doesn't match EN's — resolves via
+// Gemini at paragraph-range granularity (same gap-filling, same
+// media-anchoring-off-style-runs logic as before line-level tracking
+// existed), since Gemini can't be asked to reason about arbitrary
+// per-line structure it's never seen.
+async function buildLanguageOutputFallback(code, targetParagraphTexts, enStyleRuns, enLinks, mediaInsertions, mediaMode, flagsOut) {
   const enParagraphCount = enStyleRuns.reduce((max, r) => Math.max(max, r.end), 0) + 1;
   const directMapping = targetParagraphTexts.length === enParagraphCount;
 
@@ -586,9 +814,14 @@ async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLi
     for (const run of nonPlainRuns) {
       const m = matches.find((x) => x.style === run.styleKey);
       if (!m || m.confidence === "low") {
-        flagsOut.push(
-          `${code}: could not confidently place "${run.styleKey}" styling — left unstyled and flagged inline.`
-        );
+        // A paragraph mixing multiple line-level styles in EN gets its own
+        // more specific flag below (once/if it's actually placed) — avoid
+        // double-flagging the same paragraph here.
+        if (!isMixedStyleKey(run.styleKey)) {
+          flagsOut.push(
+            `${code}: could not confidently place "${run.styleKey}" styling — left unstyled and flagged inline.`
+          );
+        }
         continue;
       }
       assignedRuns.push({ ...run, start: m.start, end: m.end });
@@ -609,6 +842,23 @@ async function buildLanguageOutput(code, targetParagraphTexts, enStyleRuns, enLi
   }
   if (cursor < targetParagraphTexts.length) {
     segments.push({ styleKey: "", openTag: "", closeTag: "", start: cursor, end: targetParagraphTexts.length - 1 });
+  }
+
+  // A paragraph that mixes multiple line-level styles in EN can't be
+  // safely styled at paragraph granularity even once Gemini has placed it
+  // — we know WHICH target paragraph it corresponds to, but not which of
+  // ITS lines should get which style. Render as plain text and flag for
+  // manual review rather than emitting the "__mixed_N__" placeholder as if
+  // it were a real tag.
+  for (const seg of segments) {
+    if (isMixedStyleKey(seg.styleKey)) {
+      flagsOut.push(
+        `${code}: paragraph has multiple line-level styles in EN, but this language's shape didn't match EN's — rendered as plain text, please check and style manually.`
+      );
+      seg.styleKey = "";
+      seg.openTag = "";
+      seg.closeTag = "";
+    }
   }
 
   // Resolve each media insertion's position in TARGET paragraph space.
@@ -703,30 +953,37 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
   }
 
   const { paragraphs: enParagraphs, mediaInsertions } = buildStructure(tokens);
-  const paraStyles = paragraphStyleKeys(enParagraphs);
-  const mixedParagraphs = paraStyles
+
+  const enFlatLines = flattenToLines(enParagraphs);
+  const enLineStyles = lineStyleKeys(enFlatLines);
+  const mixedLines = enLineStyles
     .map((s, i) => (s.uniform ? null : i))
     .filter((i) => i !== null);
-  if (mixedParagraphs.length > 0) {
+  if (mixedLines.length > 0) {
     throw new Error(
-      `Paragraph(s) ${mixedParagraphs.join(", ")} contain mixed styling within a single paragraph ` +
-        `(likely genuine mid-sentence / sub-phrase styling). This tool doesn't auto-resolve that case yet — ` +
+      `Line(s) at flat index ${mixedLines.join(", ")} contain mixed styling within a single line ` +
+        `(genuine mid-sentence / sub-phrase styling — different styling on PART of one line, not just different ` +
+        `lines within a paragraph, which is handled automatically). This tool doesn't auto-resolve that case yet — ` +
         `see the SKILL.md notes on sub-phrase matching for the manual approach.`
     );
   }
-  const enStyleRuns = collapseStyleRuns(paraStyles);
-  const enParagraphTexts = enParagraphs.map(paragraphPlainText);
+  const enLineStyleRuns = collapseStyleRuns(enLineStyles);
 
-  // Map each matched Excel row to the EN paragraphs its content falls
-  // within, by content length rather than any assumption about what
-  // separates two adjacent rows in the sourcecode (see the file-level
-  // comment above). A thrown error here means a genuine content
-  // difference, not just formatting — append the same included/excluded
-  // row diagnostic the old paragraph-count check used, so whoever hits
-  // this can still see exactly which row is the problem.
+  const enParagraphStyles = paragraphStyleFromLines(enParagraphs);
+  const enStyleRuns = collapseStyleRuns(enParagraphStyles);
+  const enParagraphTexts = enParagraphs.map(paragraphPlainText);
+  const enShape = paragraphsShape(enParagraphs);
+
+  // Map each matched Excel row to the EN lines its content falls within,
+  // by content length rather than any assumption about what separates two
+  // adjacent rows in the sourcecode (see the file-level comment above). A
+  // thrown error here means a genuine content difference, not just
+  // formatting — append the same included/excluded row diagnostic the old
+  // paragraph-count check used, so whoever hits this can still see
+  // exactly which row is the problem.
   let rowSpans;
   try {
-    rowSpans = mapRowsToParagraphs(contentRowIndices, rows, enColIdx, enParagraphTexts, "EN");
+    rowSpans = mapRowsToLines(contentRowIndices, rows, enColIdx, enFlatLines, "EN");
   } catch (e) {
     const contentLines = contentRowIndices
       .map((r) => `  CONTENT row ${r + 1}: "${String(rows[r][enColIdx]).slice(0, 60)}"`)
@@ -776,17 +1033,34 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
     // Rebuilt directly from this language's own row text, applying the
     // same merge/fresh-break pattern EN's rows established at each row
     // boundary — no delimiter guessing between rows.
-    const targetParagraphTexts = buildParagraphTextsFromRows(contentRowIndices, rows, colIdx, rowTransitionMerges);
+    const targetParagraphs = buildLineStructureFromRows(contentRowIndices, rows, colIdx, rowTransitionMerges);
+    const targetShape = paragraphsShape(targetParagraphs);
 
-    const blocks = await buildLanguageOutput(
-      lang.code,
-      targetParagraphTexts,
-      enStyleRuns,
-      enLinks,
-      mediaInsertions,
-      flags,
-      mediaMode
-    );
+    let blocks;
+    if (shapesMatch(targetShape, enShape)) {
+      const targetFlatLineTexts = targetParagraphs.flatMap((p) => p.map((l) => l.text));
+      blocks = buildLanguageOutputDirect(
+        lang.code,
+        targetFlatLineTexts,
+        enFlatLines,
+        enLineStyleRuns,
+        enLinks,
+        mediaInsertions,
+        mediaMode || "localize",
+        flags
+      );
+    } else {
+      const targetParagraphTexts = joinLinesToPlainText(targetParagraphs);
+      blocks = await buildLanguageOutputFallback(
+        lang.code,
+        targetParagraphTexts,
+        enStyleRuns,
+        enLinks,
+        mediaInsertions,
+        mediaMode || "localize",
+        flags
+      );
+    }
 
     // Each block is already a complete <p>...</p> or media element;
     // join them as siblings. No leading empty <p></p><p></p> spacer is
@@ -807,12 +1081,18 @@ window.wiki14 = {
     tokenizeSourcecode,
     flattenTokens,
     buildStructure,
-    paragraphStyleKeys,
+    flattenToLines,
+    lineStyleKeys,
+    paragraphStyleFromLines,
     collapseStyleRuns,
     paragraphPlainText,
     stripAllWhitespace,
-    mapRowsToParagraphs,
+    mapRowsToLines,
     computeRowTransitionMerges,
-    buildParagraphTextsFromRows,
+    buildLineStructureFromRows,
+    paragraphsShape,
+    shapesMatch,
+    joinLinesToPlainText,
+    isMixedStyleKey,
   },
 };
