@@ -152,7 +152,7 @@ els.runButton.addEventListener("click", async () => {
   setStatus("Starting...", false);
 
   try {
-    const { outputs, flags } = await window.wiki14.runPipeline(
+    const { outputs, titles, flags } = await window.wiki14.runPipeline(
       sourcecode,
       workbookSource,
       sheetName,
@@ -161,7 +161,7 @@ els.runButton.addEventListener("click", async () => {
     );
     setStatus(`Done — generated ${Object.keys(outputs).length} languages.`, false);
     renderFlags(flags);
-    renderResults(outputs);
+    renderResults(outputs, titles);
   } catch (e) {
     setStatus(e.message, true);
     console.error(e);
@@ -176,16 +176,38 @@ function setStatus(text, isError) {
   els.status.classList.toggle("error", !!isError);
 }
 
+// Every flag pushed in app.js is either "${langCode}: message" (per-language)
+// or a bare message with no language prefix (page-level, e.g. no title row
+// found). Grouping by the message text collapses the common case — the same
+// issue repeated across most of the 13 languages — into one line with all
+// affected languages listed, instead of a near-duplicate line per language.
 function renderFlags(flags) {
   if (!flags || flags.length === 0) return;
-  els.flags.innerHTML =
-    `<strong>Double-check before pasting:</strong><ul>${flags
-      .map((f) => `<li>${escapeForDisplay(f)}</li>`)
-      .join("")}</ul>`;
+  const groups = new Map(); // message -> language codes
+  const ungrouped = [];
+  for (const f of flags) {
+    const m = f.match(/^([A-Z]{2,4}): (.+)$/s);
+    if (!m) {
+      ungrouped.push(f);
+      continue;
+    }
+    const [, code, message] = m;
+    if (!groups.has(message)) groups.set(message, []);
+    groups.get(message).push(code);
+  }
+  const items = [
+    ...[...groups.entries()].map(
+      ([message, codes]) => `${escapeForDisplay(message)} (${codes.join(", ")})`
+    ),
+    ...ungrouped.map((f) => escapeForDisplay(f)),
+  ];
+  els.flags.innerHTML = `<strong>Double-check before pasting:</strong><ul>${items
+    .map((i) => `<li>${i}</li>`)
+    .join("")}</ul>`;
   els.flags.classList.remove("hidden");
 }
 
-function renderResults(outputs) {
+function renderResults(outputs, titles) {
   const codes = Object.keys(outputs);
   els.tabs.innerHTML = codes
     .map((code, i) => `<button class="tab${i === 0 ? " active" : ""}" data-code="${code}">${code}</button>`)
@@ -194,7 +216,12 @@ function renderResults(outputs) {
     .map(
       (code, i) => `
       <div class="panel${i === 0 ? " active" : ""}" data-code="${code}">
-        <div class="panel-toolbar"><button class="copy-button" data-code="${code}">Copy</button></div>
+        <div class="title-row">
+          <span class="title-label">Title</span>
+          <input type="text" class="title-input" readonly value="${escapeForAttr(titles[code] || "")}" />
+          <button class="copy-button copy-title-button" data-code="${code}">Copy</button>
+        </div>
+        <div class="panel-toolbar"><button class="copy-button copy-body-button" data-code="${code}">Copy</button></div>
         <pre class="code-output">${escapeForDisplay(outputs[code])}</pre>
       </div>`
     )
@@ -208,17 +235,21 @@ function renderResults(outputs) {
     });
   });
 
-  els.panels.querySelectorAll(".copy-button").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(outputs[btn.dataset.code]);
-      btn.textContent = "Copied";
-      btn.classList.add("copied");
-      setTimeout(() => {
-        btn.textContent = "Copy";
-        btn.classList.remove("copied");
-      }, 1500);
+  const wireCopyButtons = (selector, textForCode) => {
+    els.panels.querySelectorAll(selector).forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(textForCode(btn.dataset.code));
+        btn.textContent = "Copied";
+        btn.classList.add("copied");
+        setTimeout(() => {
+          btn.textContent = "Copy";
+          btn.classList.remove("copied");
+        }, 1500);
+      });
     });
-  });
+  };
+  wireCopyButtons(".copy-body-button", (code) => outputs[code]);
+  wireCopyButtons(".copy-title-button", (code) => titles[code] || "");
 
   els.results.classList.remove("hidden");
 }
@@ -227,4 +258,8 @@ function escapeForDisplay(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+function escapeForAttr(text) {
+  return escapeForDisplay(text).replace(/"/g, "&quot;");
 }

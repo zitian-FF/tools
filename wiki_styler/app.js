@@ -668,6 +668,21 @@ function renderParagraphRange(paragraphTexts, start, end, openTag, closeTag, enL
 //                           flagged so a mixed page (some assets
 //                           per-language, some shared) stays visible
 //                           instead of silently passing through either way.
+// Best-effort: the article title lives in whichever metadata row has no
+// match in the sourcecode body — the same set of rows the content-mismatch
+// diagnostic above lists as EXCLUDED. It's usually the first such row, but
+// occasionally a contributor-name/checker row comes first instead — there's
+// no reliable structural signal to tell them apart (column layout varies,
+// human error happens), so this is intentionally just a best-effort guess
+// for a manual-review copy field, not something pasted into the body output
+// automatically. A wrong or blank guess for one language isn't flagged
+// individually — it's caught by eyeballing the field before copying it.
+function extractTitle(excludedRows, rows, colIdx) {
+  if (excludedRows.length === 0) return "";
+  const cell = rows[excludedRows[0].row][colIdx];
+  return typeof cell === "string" ? cell.trim() : "";
+}
+
 function resolveMediaSrc(src, code, mediaMode, flagsOut, langCode) {
   if (mediaMode === "dont-localize") return src;
   if (src.includes("_EN.")) {
@@ -1012,6 +1027,11 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
 
   const flags = [];
   const outputs = {};
+  const titles = {};
+
+  if (excludedRows.length === 0) {
+    flags.push("No title row found in sheet (no rows were excluded from the body match) — title fields left blank.");
+  }
 
   for (const lang of lookup.languages) {
     if (lang.code === "EN") continue;
@@ -1029,6 +1049,8 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
     }
 
     onProgress && onProgress(`Processing ${lang.code}...`);
+
+    titles[lang.code] = extractTitle(excludedRows, rows, colIdx);
 
     // Rebuilt directly from this language's own row text, applying the
     // same merge/fresh-break pattern EN's rows established at each row
@@ -1069,7 +1091,7 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
     outputs[lang.code] = blocks.map((b) => b.html).join("");
   }
 
-  return { outputs, flags };
+  return { outputs, titles, flags };
 }
 
 window.wiki14 = {
@@ -1087,6 +1109,7 @@ window.wiki14 = {
     collapseStyleRuns,
     paragraphPlainText,
     stripAllWhitespace,
+    extractTitle,
     mapRowsToLines,
     computeRowTransitionMerges,
     buildLineStructureFromRows,
