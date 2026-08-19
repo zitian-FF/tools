@@ -666,15 +666,10 @@ function renderParagraphRange(paragraphTexts, start, end, openTag, closeTag, enL
 }
 
 // Applies the media localization mode to one image/video src:
-//   "dont-localize"      — always return src unchanged.
-//   "localize"           — swap "_EN." to "_{code}." when present; if the
-//                           "_EN." pattern isn't found, leave src unchanged
-//                           silently (assumes every file follows the
-//                           convention, so a miss isn't worth flagging).
-//   "localize-if-suffix" — same swap-if-present behavior, but a miss gets
-//                           flagged so a mixed page (some assets
-//                           per-language, some shared) stays visible
-//                           instead of silently passing through either way.
+//   "dont-localize" — always return src unchanged.
+//   "localize"      — swap "_EN." to "_{code}." when present; if the "_EN."
+//                      pattern isn't found, leave src unchanged (assumes
+//                      every file follows the convention).
 // Best-effort: the article title lives in whichever metadata row has no
 // match in the sourcecode body — the same set of rows the content-mismatch
 // diagnostic above lists as EXCLUDED. It's usually the first such row, but
@@ -690,15 +685,10 @@ function extractTitle(excludedRows, rows, colIdx) {
   return typeof cell === "string" ? cell.trim() : "";
 }
 
-function resolveMediaSrc(src, code, mediaMode, flagsOut, langCode) {
+function resolveMediaSrc(src, code, mediaMode) {
   if (mediaMode === "dont-localize") return src;
   if (src.includes("_EN.")) {
     return src.replace("_EN.", `_${code}.`);
-  }
-  if (mediaMode === "localize-if-suffix") {
-    flagsOut.push(
-      `${langCode}: media file "${src}" has no "_EN." naming pattern — left as-is (mode: localize only if suffix exists).`
-    );
   }
   return src;
 }
@@ -745,9 +735,8 @@ function buildLanguageOutputDirect(code, targetFlatLineTexts, enFlatLines, enLin
     while (mediaCursor < sortedMedia.length && sortedMedia[mediaCursor].beforeParagraphIndex <= paragraphIndex) {
       const m = sortedMedia[mediaCursor];
       // No src (e.g. <hr>) means nothing to localize — reproduce verbatim
-      // instead of calling resolveMediaSrc, which would otherwise flag it
-      // as a media file with no "_EN." naming pattern.
-      const html = m.src ? m.outerHTML.split(m.src).join(resolveMediaSrc(m.src, code, mediaMode, flagsOut, code)) : m.outerHTML;
+      // instead of calling resolveMediaSrc.
+      const html = m.src ? m.outerHTML.split(m.src).join(resolveMediaSrc(m.src, code, mediaMode)) : m.outerHTML;
       blocks.push({ type: "media", html });
       mediaCursor++;
     }
@@ -932,11 +921,10 @@ async function buildLanguageOutputFallback(code, targetParagraphTexts, enStyleRu
     while (mediaCursor < sortedMedia.length && sortedMedia[mediaCursor].targetIndex <= paragraphIndex) {
       const m = sortedMedia[mediaCursor];
       // No src (e.g. <hr>) means nothing to localize — reproduce verbatim
-      // instead of calling resolveMediaSrc, which would otherwise flag it
-      // as a media file with no "_EN." naming pattern. Otherwise split/join
-      // instead of replace() since src typically also appears in an alt=""
-      // attribute and both should be swapped.
-      const html = m.src ? m.outerHTML.split(m.src).join(resolveMediaSrc(m.src, code, mediaMode, flagsOut, code)) : m.outerHTML;
+      // instead of calling resolveMediaSrc. Otherwise split/join instead of
+      // replace() since src typically also appears in an alt="" attribute
+      // and both should be swapped.
+      const html = m.src ? m.outerHTML.split(m.src).join(resolveMediaSrc(m.src, code, mediaMode)) : m.outerHTML;
       blocks.push({ type: "media", html });
       mediaCursor++;
     }
