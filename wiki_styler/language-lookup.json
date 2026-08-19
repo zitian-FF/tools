@@ -11,7 +11,7 @@
     {
       "name": "English",
       "code": "EN",
-      "mutations": ["EN", "English"]
+      "mutations": ["EN", "English","en"]
     },
     {
       "name": "Chinese (Traditional)",
