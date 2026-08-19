@@ -27,11 +27,17 @@
 //   5. Reassemble HTML, merging consecutive same-style paragraphs into a
 //      single continuous tag (matching how the EN source itself is written).
 //
-// Known limitation (unchanged from the manual process): this only handles
-// styling that is uniform across whole paragraphs / paragraph ranges. Genuine
-// mid-sentence (sub-phrase) styling isn't handled by this tool yet — if you
-// hit that on a real page, treat it as a signal to extend this, not to trust
-// a silent guess.
+// Genuine mid-sentence (sub-phrase) styling — different styling on part of
+// one line, e.g. a plain lead-in immediately followed by a bold clause with
+// no line break between — has no structural anchor to place in translated
+// text, so it's resolved via a dedicated Gemini call per line
+// (applySubPhraseResolution / Worker route /resolve-subphrase) rather than
+// offset/structure matching. This only runs on the direct (line-shape-
+// matched) path, where each EN line maps to exactly one known target line;
+// a mixed line inside a paragraph that needs the Gemini paragraph-range
+// fallback instead still degrades to plain text + a flag (see
+// paragraphStyleFromLines's "__mixed_" handling), since that path never
+// resolves an individual target line to search within.
 
 const CONFIG = {
   workerUrl: "https://wiki14-gemini-proxy.tianz-88.workers.dev", // TODO: set to your deployed Worker URL
@@ -697,6 +703,117 @@ function resolveMediaSrc(src, code, mediaMode) {
 // paragraph's own line count) matches EN's exactly — applies EN's
 // per-line style runs directly by flat-line-index, no Gemini call.
 //
+// ---------- Sub-phrase (mid-line) styling resolution ----------
+
+// Sentinel markers stand in for a resolved sub-phrase's open/close tags
+// while the target line text still has to pass through escapeHtml/linkify
+// (inside buildLanguageOutputDirect) — splicing the real HTML tags in here
+// directly would get them escaped into visible text. Private Use Area
+// characters are used since real translated text can never contain them and
+// escapeHtml never touches them.
+function subPhraseOpenMarker(idx) {
+  return `${idx}`;
+}
+function subPhraseCloseMarker(idx) {
+  return `${idx}`;
+}
+
+// Swaps sentinel markers for the real tags they stand in for, over the
+// final assembled HTML for one language. sentinelTags is the array returned
+// by applySubPhraseResolution — index N's {openTag, closeTag} corresponds to
+// marker index N.
+function resolveSentinelMarkers(html, sentinelTags) {
+  return html
+    .replace(/(\d+)/g, (_, idx) => sentinelTags[Number(idx)].openTag)
+    .replace(/(\d+)/g, (_, idx) => sentinelTags[Number(idx)].closeTag);
+}
+
+async function resolveSubPhraseViaGemini(items) {
+  const resp = await fetch(`${CONFIG.workerUrl}/resolve-subphrase`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-app-token": CONFIG.appToken,
+    },
+    body: JSON.stringify({
+      items: items.map((it) => ({
+        id: it.id,
+        context_line: it.contextText,
+        styled_text: it.styledText,
+        target_text: it.targetText,
+      })),
+    }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Gemini proxy request failed: ${resp.status}`);
+  }
+  return resp.json(); // { matches: [{id, target_text, confidence}, ...] }
+}
+
+// Resolves genuine mid-line (sub-phrase) styling: a line that mixes multiple
+// styles WITHIN itself (e.g. a plain lead-in immediately followed by a bold
+// clause, no line break between) has no structural anchor to place the
+// equivalent styling in translated text — word order and phrasing differ
+// too much across languages for offset-based matching to work here, so this
+// asks Gemini directly, one task per non-plain run on the line. Only usable
+// on the direct (line-shape-matched) path, where each EN line maps to
+// exactly one known target line, giving Gemini an unambiguous per-task
+// search space; a mixed line inside a paragraph that needs the Gemini
+// paragraph-range fallback instead stays on the existing "__mixed_" plain
+// text + flag behavior, since that path doesn't resolve a single target line
+// at all.
+//
+// Mutates targetFlatLineTexts in place, splicing sentinel markers (not real
+// tags) around each resolved substring. Returns the sentinelTags array the
+// caller must pass into resolveSentinelMarkers() over the final assembled
+// HTML.
+async function applySubPhraseResolution(code, targetFlatLineTexts, subPhraseTasksByFlatLine, flagsOut) {
+  const items = [];
+  for (const [flatLineIndex, entry] of subPhraseTasksByFlatLine) {
+    entry.tasks.forEach((task, taskIndex) => {
+      items.push({
+        id: `${flatLineIndex}:${taskIndex}`,
+        contextText: entry.contextText,
+        styledText: task.text,
+        targetText: targetFlatLineTexts[flatLineIndex],
+      });
+    });
+  }
+  if (items.length === 0) return [];
+
+  let matches = [];
+  try {
+    const result = await resolveSubPhraseViaGemini(items);
+    matches = result.matches || [];
+  } catch (e) {
+    flagsOut.push(`${code}: sub-phrase styling resolution failed (${e.message}) — left unstyled and flagged inline.`);
+  }
+  const matchById = new Map(matches.map((m) => [m.id, m]));
+
+  const sentinelTags = [];
+  for (const [flatLineIndex, entry] of subPhraseTasksByFlatLine) {
+    let lineText = targetFlatLineTexts[flatLineIndex];
+    entry.tasks.forEach((task, taskIndex) => {
+      const id = `${flatLineIndex}:${taskIndex}`;
+      const m = matchById.get(id);
+      if (!m || m.confidence === "low" || !m.target_text || !lineText.includes(m.target_text)) {
+        flagsOut.push(
+          `${code}: could not confidently place "${task.styleKey}" sub-phrase styling — left unstyled and flagged inline.`
+        );
+        return;
+      }
+      const idx = sentinelTags.length;
+      sentinelTags.push({ openTag: task.openTag, closeTag: task.closeTag });
+      lineText = lineText.replace(
+        m.target_text,
+        `${subPhraseOpenMarker(idx)}${m.target_text}${subPhraseCloseMarker(idx)}`
+      );
+    });
+    targetFlatLineTexts[flatLineIndex] = lineText;
+  }
+  return sentinelTags;
+}
+
 // Processes lines in a single sequential pass (not paragraph-outer/
 // segment-inner, and not segment-outer either — both were tried and both
 // had real bugs). This is what correctly handles both: (a) one continuous
@@ -979,18 +1096,28 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
 
   const enFlatLines = flattenToLines(enParagraphs);
   const enLineStyles = lineStyleKeys(enFlatLines);
-  const mixedLines = enLineStyles
-    .map((s, i) => (s.uniform ? null : i))
-    .filter((i) => i !== null);
-  if (mixedLines.length > 0) {
-    throw new Error(
-      `Line(s) at flat index ${mixedLines.join(", ")} contain mixed styling within a single line ` +
-        `(genuine mid-sentence / sub-phrase styling — different styling on PART of one line, not just different ` +
-        `lines within a paragraph, which is handled automatically). This tool doesn't auto-resolve that case yet — ` +
-        `see the SKILL.md notes on sub-phrase matching for the manual approach.`
-    );
-  }
-  const enLineStyleRuns = collapseStyleRuns(enLineStyles);
+
+  // A line that mixes multiple styles WITHIN itself (genuine mid-sentence /
+  // sub-phrase styling — different styling on PART of one line, not just
+  // different lines within a paragraph, which collapseStyleRuns already
+  // handles) has no structural anchor to place in translated text — so it's
+  // resolved per language via applySubPhraseResolution (Gemini) rather than
+  // thrown as an error. Extract each of the line's non-plain runs as a task,
+  // then treat the line as plain for the rest of this function; the correct
+  // tags get spliced back in once each language's own line text is known.
+  const subPhraseTasksByFlatLine = new Map();
+  const sanitizedLineStyles = enLineStyles.map((s, i) => {
+    if (s.uniform) return s;
+    const line = enFlatLines[i];
+    const tasks = line.runs
+      .filter((r) => r.styleKey !== "")
+      .map((r) => ({ text: r.text, styleKey: r.styleKey, openTag: r.openTag, closeTag: r.closeTag }));
+    if (tasks.length > 0) {
+      subPhraseTasksByFlatLine.set(i, { contextText: line.runs.map((r) => r.text).join(""), tasks });
+    }
+    return { uniform: true, styleKey: "", instanceKey: "", openTag: "", closeTag: "" };
+  });
+  const enLineStyleRuns = collapseStyleRuns(sanitizedLineStyles);
 
   const enParagraphStyles = paragraphStyleFromLines(enParagraphs);
   const enStyleRuns = collapseStyleRuns(enParagraphStyles);
@@ -1066,10 +1193,17 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
     const targetParagraphs = buildLineStructureFromRows(contentRowIndices, rows, colIdx, rowTransitionMerges);
     const targetShape = paragraphsShape(targetParagraphs);
 
-    let blocks;
+    // Each block is already a complete <p>...</p> or media element; joined
+    // as siblings below. No leading empty <p></p><p></p> spacer is assumed
+    // here — that was specific to the validated test page's own layout, not
+    // a general rule, so it isn't reproduced automatically.
     if (shapesMatch(targetShape, enShape)) {
       const targetFlatLineTexts = targetParagraphs.flatMap((p) => p.map((l) => l.text));
-      blocks = buildLanguageOutputDirect(
+      const sentinelTags =
+        subPhraseTasksByFlatLine.size > 0
+          ? await applySubPhraseResolution(lang.code, targetFlatLineTexts, subPhraseTasksByFlatLine, flags)
+          : [];
+      const blocks = buildLanguageOutputDirect(
         lang.code,
         targetFlatLineTexts,
         enFlatLines,
@@ -1079,9 +1213,10 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
         mediaMode || "localize",
         flags
       );
+      outputs[lang.code] = resolveSentinelMarkers(blocks.map((b) => b.html).join(""), sentinelTags);
     } else {
       const targetParagraphTexts = joinLinesToPlainText(targetParagraphs);
-      blocks = await buildLanguageOutputFallback(
+      const blocks = await buildLanguageOutputFallback(
         lang.code,
         targetParagraphTexts,
         enStyleRuns,
@@ -1090,13 +1225,8 @@ async function runPipeline(enSourcecode, workbookSource, sheetName, onProgress, 
         mediaMode || "localize",
         flags
       );
+      outputs[lang.code] = blocks.map((b) => b.html).join("");
     }
-
-    // Each block is already a complete <p>...</p> or media element;
-    // join them as siblings. No leading empty <p></p><p></p> spacer is
-    // assumed here — that was specific to the validated test page's own
-    // layout, not a general rule, so it isn't reproduced automatically.
-    outputs[lang.code] = blocks.map((b) => b.html).join("");
   }
 
   return { outputs, titles, flags };
@@ -1125,5 +1255,9 @@ window.wiki14 = {
     shapesMatch,
     joinLinesToPlainText,
     isMixedStyleKey,
+    subPhraseOpenMarker,
+    subPhraseCloseMarker,
+    resolveSentinelMarkers,
+    applySubPhraseResolution,
   },
 };
