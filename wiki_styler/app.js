@@ -109,6 +109,13 @@ function tokenizeSourcecode(html) {
             src: child.getAttribute("src") || "",
             outerHTML: child.outerHTML,
           });
+        } else if (tag === "hr") {
+          // No src to localize — reuses the "media" token type purely for
+          // the block-boundary flush + verbatim-reproduction behavior it
+          // already gives img/video, so <hr> stops being silently dropped
+          // and stops letting content on either side of it merge into one
+          // continuous style run.
+          tokens.push({ type: "media", tag: "hr", src: "", outerHTML: child.outerHTML });
         } else if (tag === "p" || tag === "div") {
           // Special-case: a div/p whose only element child is a single
           // img/video (the common "image block" wrapper, e.g.
@@ -737,8 +744,10 @@ function buildLanguageOutputDirect(code, targetFlatLineTexts, enFlatLines, enLin
     const blocks = [];
     while (mediaCursor < sortedMedia.length && sortedMedia[mediaCursor].beforeParagraphIndex <= paragraphIndex) {
       const m = sortedMedia[mediaCursor];
-      const swappedSrc = resolveMediaSrc(m.src, code, mediaMode, flagsOut, code);
-      const html = m.src ? m.outerHTML.split(m.src).join(swappedSrc) : m.outerHTML;
+      // No src (e.g. <hr>) means nothing to localize — reproduce verbatim
+      // instead of calling resolveMediaSrc, which would otherwise flag it
+      // as a media file with no "_EN." naming pattern.
+      const html = m.src ? m.outerHTML.split(m.src).join(resolveMediaSrc(m.src, code, mediaMode, flagsOut, code)) : m.outerHTML;
       blocks.push({ type: "media", html });
       mediaCursor++;
     }
@@ -886,14 +895,23 @@ async function buildLanguageOutputFallback(code, targetParagraphTexts, enStyleRu
   const resolvedMedia = mediaInsertions.map((m) => {
     if (directMapping) return { ...m, targetIndex: m.beforeParagraphIndex };
 
+    // A media item can sit at a boundary that's simultaneously the end of
+    // one run and the start of another (e.g. a plain stretch immediately
+    // followed by a styled paragraph). Plain runs never get an explicit
+    // assignedRuns entry (they're inferred later as gaps), so anchoring off
+    // the plain side alone would always fail here even when the other side
+    // of the same boundary is a real, resolved run — try both sides and use
+    // whichever one actually resolved, instead of committing to just one.
     const afterRun = enStyleRuns.find((r) => r.end + 1 === m.beforeParagraphIndex);
     const beforeRun = enStyleRuns.find((r) => r.start === m.beforeParagraphIndex);
-    const anchorRun = afterRun || beforeRun;
-    const assigned = anchorRun && assignedRuns.find((r) => r.styleKey === anchorRun.styleKey);
+    const afterAssigned = afterRun && assignedRuns.find((r) => r.styleKey === afterRun.styleKey);
+    const beforeAssigned = beforeRun && assignedRuns.find((r) => r.styleKey === beforeRun.styleKey);
 
-    if (assigned) {
-      const targetIndex = afterRun ? assigned.end + 1 : assigned.start;
-      return { ...m, targetIndex };
+    if (afterAssigned) {
+      return { ...m, targetIndex: afterAssigned.end + 1 };
+    }
+    if (beforeAssigned) {
+      return { ...m, targetIndex: beforeAssigned.start };
     }
 
     flagsOut.push(`${code}: image/video position estimated (no exact style-run anchor found) — please verify placement.`);
@@ -913,10 +931,12 @@ async function buildLanguageOutputFallback(code, targetParagraphTexts, enStyleRu
     const blocks = [];
     while (mediaCursor < sortedMedia.length && sortedMedia[mediaCursor].targetIndex <= paragraphIndex) {
       const m = sortedMedia[mediaCursor];
-      const swappedSrc = resolveMediaSrc(m.src, code, mediaMode, flagsOut, code);
-      // split/join instead of replace() since src typically also appears
-      // in an alt="" attribute and both should be swapped.
-      const html = m.src ? m.outerHTML.split(m.src).join(swappedSrc) : m.outerHTML;
+      // No src (e.g. <hr>) means nothing to localize — reproduce verbatim
+      // instead of calling resolveMediaSrc, which would otherwise flag it
+      // as a media file with no "_EN." naming pattern. Otherwise split/join
+      // instead of replace() since src typically also appears in an alt=""
+      // attribute and both should be swapped.
+      const html = m.src ? m.outerHTML.split(m.src).join(resolveMediaSrc(m.src, code, mediaMode, flagsOut, code)) : m.outerHTML;
       blocks.push({ type: "media", html });
       mediaCursor++;
     }
