@@ -61,7 +61,7 @@
     {
       "name": "Portuguese",
       "code": "PT",
-      "mutations": ["PT", "PTG", "Português"]
+      "mutations": ["PT", "PTG", "Português","pt"]
     },
     {
       "name": "Thai",
