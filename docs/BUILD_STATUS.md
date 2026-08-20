@@ -6,15 +6,14 @@ overwritten after every push by whichever Claude Code session made it — see
 
 ## Current milestone
 
-Sub-phrase (mid-line) styling resolution. Client side is complete and
-pushed to `main`. The Worker side (`worker-wiki14/index.js`'s new
-`/resolve-subphrase` route) is also committed to this repo, but **has not
-yet been deployed** — it still needs to be manually pasted into the
-Cloudflare dashboard before it's live. Until that happens, a page with a
-mixed-styling line (e.g. a plain lead-in immediately followed by a bold
-clause, no line break between) will fail with "sub-phrase styling
-resolution failed" flags on the live site, even though the local code
-handles it.
+Sub-phrase (mid-line) styling resolution. Client side and the Worker side
+(`worker-wiki14/index.js`'s `/resolve-subphrase` route) are both complete,
+committed, and **live** — the user has confirmed the Worker route was
+manually deployed to the Cloudflare dashboard. A page with a mixed-styling
+line (e.g. a plain lead-in immediately followed by a bold clause, no line
+break between) should now resolve correctly on the live site when it hits
+the direct (line-shape-matched) path; see "Open questions" below for the
+still-unresolved fallback-path case.
 
 ## What was implemented
 
@@ -75,8 +74,7 @@ handles it.
 `x-app-token` header check:
 - `/resolve-styles` (also served at bare `/` for backwards compatibility):
   paragraph-range resolution by meaning.
-- `/resolve-subphrase`: mid-line substring resolution (see above) — written
-  but not yet deployed.
+- `/resolve-subphrase`: mid-line substring resolution (see above) — live.
 - `/fetch-sheet`: server-side Google Sheets CSV fetch.
 
 **Tests** (`dev-tests-wiki14/test_harness.js`): runs the real `app.js` in a
@@ -109,26 +107,43 @@ scripts during development, not added to this harness.
   failure, a returned substring that doesn't literally exist in the target
   text) is flagged for manual review and left unstyled — never guessed
   silently.
+- **Resolved**: paragraph-level Gemini fallback (`/resolve-styles`) will
+  NOT be merged into line-level direct-path matching. Fallback exists
+  specifically for cases where paragraph/line structure has diverged
+  between EN and the target language — assuming line correspondence there
+  would reintroduce the exact assumption (translators preserve line
+  structure across languages) that caused the original client-side matching
+  approach to fail. This is a settled design decision, not an open item.
 
 ## Open questions
 
-- Should sub-phrase resolution be extended to the Gemini paragraph-range
-  fallback path too, or is the direct-path-only scope permanent?
+- The fallback path (`buildLanguageOutputFallback`) currently degrades ANY
+  paragraph containing multiple distinct EN styles straight to plain text +
+  a manual-review flag, whether the styles are on separate lines or mixed
+  within one line — no resolution is attempted. A candidate fix was
+  identified: `resolveSubPhraseViaGemini`'s actual mechanism (verify a
+  literal substring match within a target text blob) doesn't require
+  line-level granularity — it only needs a `target_text` to search and a
+  literal-inclusion check before accepting a match. This means the same
+  mechanism could run against the FULL resolved paragraph-range blob (from
+  `buildLanguageOutputFallback`) instead of a single known line, without
+  assuming any line correspondence. This would need a parallel version of
+  `applySubPhraseResolution` operating on paragraph blobs and multiple
+  style runs per paragraph, not flat line indices — real new plumbing, not
+  a small patch. Not started. User wants to run a better diagnostic pass on
+  real pages before deciding whether this is worth building. (Note: this is
+  distinct from the settled "don't assume line correspondence in fallback"
+  decision above — this candidate mechanism specifically doesn't make that
+  assumption, which is why it's still on the table.)
 - `README.md` (repo root) still describes an entirely different, older
   architecture (pre-wiki14 rewrite: "`<br>`-bounded runs",
   "delimiter-anchored styling"). `wiki_styler/README.md` is closer but
   still describes sub-phrase styling as an unhandled error. Should these be
   brought current, and if so is that in scope for a Claude Code session or
   something the design chat should draft first?
-- Should the Excel header-column matching (`findEnColumn` /
-  language-mutation lookup) be made case-insensitive generally, or was the
-  recent manual fix (adding lowercase `"pt"` to Portuguese's mutation list)
-  meant to stay a one-off?
 
 ## Known issues
 
-- **`/resolve-subphrase` Worker route not yet deployed live** — see
-  "Current milestone" above.
 - **User-reported "Failed to fetch" on the Google Sheets URL feature** on
   the live site — not yet root-caused. Most likely either the live Worker
   predates the `/fetch-sheet` route, or a CORS misconfiguration; browser
@@ -149,8 +164,10 @@ scripts during development, not added to this harness.
 
 ## Next proposed step
 
-1. Deploy the updated `worker-wiki14/index.js` (with `/resolve-subphrase`)
-   to the live Cloudflare Worker.
-2. Root-cause and fix the Google Sheets URL "Failed to fetch" report.
-3. Decide on the two open documentation/scope questions above before they
-   accumulate further drift.
+1. Root-cause and fix the Google Sheets URL "Failed to fetch" report.
+2. Run a diagnostic pass on real pages to gauge how often the fallback path
+   actually hits a multi-style paragraph, informing whether the
+   paragraph-blob sub-phrase mechanism (see "Open questions") is worth
+   building.
+3. Decide on the README staleness question before it accumulates further
+   drift.
