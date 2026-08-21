@@ -69,6 +69,19 @@ still-unresolved fallback-path case.
   it's a manual-review field).
 - Warnings UI: grouped by message text with affected language codes listed
   in parentheses, instead of one near-duplicate line per language.
+- **CORS fix**: `ALLOWED_ORIGIN` in `worker-wiki14/index.js` was left at its
+  placeholder value (`https://YOUR-GITHUB-USERNAME.github.io`) instead of
+  the real GitHub Pages origin. This caused every CORS preflight (`OPTIONS`)
+  to succeed while every actual `POST` to `/resolve-styles` and
+  `/fetch-sheet` was silently blocked by the browser afterward — confirmed
+  via Cloudflare Worker invocation logs showing only `OPTIONS` entries,
+  never a matching `POST`. This affected ALL languages/routes, not just the
+  Google Sheets URL feature originally suspected. Root-caused and fixed
+  directly in the Cloudflare dashboard by the user
+  (`ALLOWED_ORIGIN = "https://zitian-ff.github.io"`); this repo's
+  `worker-wiki14/index.js` has now been updated to match. The fix is live,
+  but a fresh end-to-end test run confirming POSTs now succeed hasn't been
+  recorded in this repo/session yet.
 
 **Worker** (`worker-wiki14/index.js`) — three routes, all gated by the same
 `x-app-token` header check:
@@ -144,10 +157,6 @@ scripts during development, not added to this harness.
 
 ## Known issues
 
-- **User-reported "Failed to fetch" on the Google Sheets URL feature** on
-  the live site — not yet root-caused. Most likely either the live Worker
-  predates the `/fetch-sheet` route, or a CORS misconfiguration; browser
-  DevTools Network-tab confirmation from the user is pending.
 - **Stale documentation**: `README.md` (repo root) and
   `wiki_styler/README.md` both describe out-of-date behavior (see "Open
   questions"). `wiki_styler/README.md` also links a stale
@@ -164,7 +173,9 @@ scripts during development, not added to this harness.
 
 ## Next proposed step
 
-1. Root-cause and fix the Google Sheets URL "Failed to fetch" report.
+1. Confirm the `ALLOWED_ORIGIN` fix end-to-end with a fresh live test run
+   (a `POST` to `/resolve-styles` or `/fetch-sheet` actually succeeding, not
+   just the `OPTIONS` preflight) — not yet recorded in this repo/session.
 2. Run a diagnostic pass on real pages to gauge how often the fallback path
    actually hits a multi-style paragraph, informing whether the
    paragraph-blob sub-phrase mechanism (see "Open questions") is worth

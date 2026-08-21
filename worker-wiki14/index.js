@@ -33,7 +33,7 @@
 // Then set ALLOWED_ORIGIN below to your GitHub Pages origin, and put the
 // same APP_TOKEN value into site/app.js (see the CONFIG block there).
 
-const ALLOWED_ORIGIN = "https://YOUR-GITHUB-USERNAME.github.io"; // TODO: set this
+const ALLOWED_ORIGIN = "https://zitian-ff.github.io";
 
 const GEMINI_MODEL = "gemini-flash-latest"; // check ai.google.dev for the current fast/cheap tier
 
