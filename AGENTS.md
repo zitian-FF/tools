@@ -38,23 +38,27 @@ simple `workerUrl: "..."` assignment format inside the `CONFIG` object in
 `app.js` — don't rename it, restructure it (e.g. into a nested object or a
 computed value), or reformat the line in a way the regex wouldn't match.
 
-## Test before push
+## Test before shipping
 
-Before pushing any change, run the existing test harness:
+Before shipping any change, run the existing test harness:
 
 ```
 cd dev-tests-wiki14 && node test_harness.js
 ```
 
-- **If it fails**: do NOT push. Write the failure details into
+- **If it fails**: do NOT open a PR. Write the failure details into
   `docs/BUILD_STATUS.md` under "Known issues" and stop there.
-- **If it passes**: commit and push directly to `main`. No branch, no PR —
-  this is a solo project and the user does not review diffs.
+- **If it passes**: commit, push to a branch, open a PR against `main`, and
+  enable GitHub's auto-merge on it so it merges on its own once mergeable.
+  No manual diff review step — this is a solo project and the user doesn't
+  review PRs by hand — but every change still goes through a PR now rather
+  than a direct push to `main`.
 
-## Update `docs/BUILD_STATUS.md` after every push
+## Update `docs/BUILD_STATUS.md` after every shipped (or blocked) change
 
-After every push — whether it succeeded, or was blocked by a test failure —
-**overwrite** `docs/BUILD_STATUS.md` using the section structure below.
+After every change — whether it shipped via a merged PR, or was blocked by
+a test failure — **overwrite** `docs/BUILD_STATUS.md` using the section
+structure below.
 Always overwrite the whole file, never append to it; it should reflect only
 the latest state, not a running log.
 
@@ -67,7 +71,7 @@ the latest state, not a running log.
 ## Next proposed step
 ```
 
-If the push was blocked by a failing test, "Known issues" is where that
+If the change was blocked by a failing test, "Known issues" is where that
 failure's details go. Otherwise "Known issues" reflects whatever real gaps
 or bugs are currently known (stale docs, undeployed Worker changes,
 unconfirmed live bugs, etc.) — it isn't reserved exclusively for test
