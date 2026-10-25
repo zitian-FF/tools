@@ -1,0 +1,16 @@
+<properties>
+    <!-- 0 = next girl on each wake, 1 = cycle while awake, 2 = fixed -->
+    <property id="rotationMode" type="number">0</property>
+    <property id="intervalSec" type="number">5</property>
+    <property id="remember" type="boolean">true</property>
+    <!-- Index into Roster.IDS: first-install girl, and the fixed-mode girl -->
+    <property id="startGirl" type="number">0</property>
+    <property id="show_gemma" type="boolean">true</property>
+    <property id="show_gptee" type="boolean">true</property>
+    <property id="show_claudia" type="boolean">true</property>
+    <property id="show_d_seeker" type="boolean">true</property>
+    <property id="show_myuse" type="boolean">true</property>
+    <property id="show_roxxy" type="boolean">true</property>
+    <property id="show_kimi" type="boolean">true</property>
+    <property id="show_cid" type="boolean">true</property>
+</properties>

@@ -1,0 +1,29 @@
+<strings>
+    <string id="AppName">AI Girls</string>
+    <string id="ModeTitle">Rotation</string>
+    <string id="ModeWake">Next girl on each wake</string>
+    <string id="ModeInterval">Cycle while awake</string>
+    <string id="ModeFixed">Fixed girl</string>
+    <string id="IntervalTitle">Cycle interval (cycle mode)</string>
+    <string id="Sec3">3 seconds</string>
+    <string id="Sec5">5 seconds</string>
+    <string id="Sec10">10 seconds</string>
+    <string id="RememberTitle">Remember last girl</string>
+    <string id="StartTitle">Starting / fixed girl</string>
+    <string id="Gemma">Gemma</string>
+    <string id="Gptee">G.P. Tee</string>
+    <string id="Claudia">Claudia</string>
+    <string id="DSeeker">D. Seeker</string>
+    <string id="Myuse">Myuse</string>
+    <string id="Roxxy">Roxxy</string>
+    <string id="Kimi">Kimi</string>
+    <string id="Cid">Cid</string>
+    <string id="ShowGemma">Show Gemma</string>
+    <string id="ShowGptee">Show G.P. Tee</string>
+    <string id="ShowClaudia">Show Claudia</string>
+    <string id="ShowDSeeker">Show D. Seeker</string>
+    <string id="ShowMyuse">Show Myuse</string>
+    <string id="ShowRoxxy">Show Roxxy</string>
+    <string id="ShowKimi">Show Kimi</string>
+    <string id="ShowCid">Show Cid</string>
+</strings>

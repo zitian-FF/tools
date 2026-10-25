@@ -1,8 +1,9 @@
 # Build status
 
-Current state of the projects in this repo: the wiki14 tool and, since
-this update, RouteNav (`garmin-route-nav/`, Garmin route navigation; added
-outside the usual three-folder scope at the user's explicit request).
+Current state of the projects in this repo: the wiki14 tool, RouteNav
+(`garmin-route-nav/`, Garmin route navigation) and the AI Girls watch face
+(`garmin-watchface/`). The two Garmin projects live outside the usual
+three-folder scope at the user's explicit request.
 Auto-overwritten after every push by whichever Claude Code session made it
 (see `AGENTS.md`). Reflects only the current state, not history.
 
@@ -21,11 +22,14 @@ still-unresolved fallback-path case.
 
 ### RouteNav (`garmin-route-nav/`)
 
-RouteNav steps 1-4 of 5 committed: route pipeline, Connect IQ watch app
-(route picker, navigation, turn alerts, cycling recording) and the phone
-route planner web page. Step 5 (compile, sideload, real-device testing) is
-next. The watch app has never been compiled: the Connect IQ SDK download
-(developer.garmin.com) is blocked from the cloud session.
+RouteNav steps 1-4 done and the watch app now compiles cleanly (SDK 9.3.0,
+vivoactive5 device files supplied by the user); PRG handed to the user for
+sideloading and real-device testing.
+
+### AI Girls watch face (`garmin-watchface/`)
+
+First build complete and simulator-verified against the v2 portrait
+handoff; PRG handed to the user. Not yet run on a physical watch.
 
 ## What was implemented
 
@@ -133,6 +137,17 @@ scripts during development, not added to this harness.
   `planner/test/test_routecore.js` (JS output byte-identical to Python;
   router-hint validation).
 
+### AI Girls watch face (`garmin-watchface/`)
+
+- Watch face for vivoactive5: portrait disk, battery ring with icon at 12,
+  hour/minute rim blocks with upright digits and collision handling,
+  always-on mode (outlined, no portrait, burn-in shift).
+- Rotation: next girl once per sleep-to-wake episode (default), interval
+  and fixed modes, per-girl enable, remembered selection.
+- `tools/make_resources.py` builds portraits (git-ignored) and Barlow
+  Condensed digit fonts from the handoff; `tools/screenshots.py` renders
+  pinned states in the simulator with lit-pixel and memory numbers.
+
 ## Key technical decisions
 
 ### Wiki tool (wiki14)
@@ -175,6 +190,14 @@ scripts during development, not added to this harness.
 - `test_nav_logic.py` mirrors `Navigator.mc` by hand; the two must be kept
   in step when either changes.
 
+### AI Girls watch face (`garmin-watchface/`)
+
+- Instant switch, no crossfade: the user chose it, and vivoactive 5 lacks
+  semi-transparent bitmap drawing anyway.
+- Bundled bitmap fonts (OFL) instead of system fonts, so the face renders
+  the same in the simulator (which lacks device fonts here) and on device.
+- Portraits stay out of git because GitHub Pages publishes the repo.
+
 ## Open questions
 
 ### Wiki tool (wiki14)
@@ -211,6 +234,11 @@ scripts during development, not added to this harness.
   geometry validation limits the damage if wrong, but real responses
   should be checked.
 
+### AI Girls watch face (`garmin-watchface/`)
+
+- Should the portrait art be committed somewhere private so the face can be
+  rebuilt without the handoff zip?
+
 ## Known issues
 
 ### Wiki tool (wiki14)
@@ -231,14 +259,20 @@ scripts during development, not added to this harness.
 
 ### RouteNav (`garmin-route-nav/`)
 
-- RouteNav watch app has never been compiled or run on a device; expect
-  compile fixes in step 5.
+- RouteNav watch app compiles but has not run on a device, and could not
+  run in the simulator (it uses system fonts the cloud simulator lacks).
 - Planner never run against the real Nominatim/BRouter/GitHub services
   (blocked from the cloud session); only against mocks in a headless
   browser.
 - The planner's GitHub token lives in localStorage on the shared
   `zitian-ff.github.io` origin (readable by the wiki tool's pages too);
   the README tells the user to limit it to Gists.
+
+### AI Girls watch face (`garmin-watchface/`)
+
+- Wake source can't be distinguished (app return/tap also advance).
+- Untested on hardware: always-on brightness, real wake behaviour, battery
+  impact.
 
 ## Next proposed step
 
@@ -259,3 +293,8 @@ scripts during development, not added to this harness.
 RouteNav: user does the one-time GitHub token setup in the planner, then
 step 5: install the Connect IQ SDK locally, compile, fix any compile
 errors, sideload to the Vivoactive 5, and test on a short ride.
+
+### AI Girls watch face (`garmin-watchface/`)
+
+User installs `AiGirls.prg` and reports how it looks and behaves on the
+watch.

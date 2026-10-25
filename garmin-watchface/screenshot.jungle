@@ -1,0 +1,3 @@
+# Used by tools/screenshots.py on top of monkey.jungle: swaps the no-op test
+# hooks for a generated set that pins time, battery, girl and sleep state.
+base.sourcePath = source;hooks/screenshot
