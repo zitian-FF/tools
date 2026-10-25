@@ -4,13 +4,50 @@ Turn-by-turn route navigation (no map tiles) for watches without built-in
 courses. Routes are prepared from GPX files, hosted in a GitHub Gist, and
 downloaded to the watch through the paired phone's Garmin Connect app.
 
-Status: steps 1-3 of 5 done (route pipeline; route picker and download;
-navigation, turn alerts and cycling recording). Next: getting real routes
-into a Gist, then building and sideloading.
+Status: steps 1-4 of 5 done (route pipeline; route picker and download;
+navigation, turn alerts and cycling recording; phone route planner).
+Next: building and sideloading.
 The watch app has not been compiled yet: the cloud session that wrote it
 cannot reach Garmin's SDK download, so the first build happens locally.
 
-## Route pipeline
+## Phone route planner (`planner/`)
+
+A web page for planning routes on the phone and saving them straight to the
+Gist, no PC needed. Served by GitHub Pages at
+`https://zitian-ff.github.io/tools/garmin-route-nav/planner/` once merged
+to `main`.
+
+- Start is the phone's location (or tap the map); search a destination or
+  tap the map; tap the map again to add stops; drag any pin to adjust.
+- Shows up to three cycling routes from BRouter (fastest, quieter,
+  alternative) with distance, time and climb. Save one, then pick another
+  and save it too for alternates on the watch.
+- Turn cues: BRouter's turn hints, each checked against the road's shape
+  (geometry wins if they disagree), plus any clear bend the router didn't
+  mention.
+- "My routes" lists saved routes, previews them, and deletes them.
+- Uses OpenStreetMap tiles and Nominatim search, BRouter routing, and the
+  GitHub API. All are free public services without uptime guarantees.
+
+`planner/routecore.js` is a port of `tools/gpx_to_route.py` and produces
+byte-identical route files (checked by the tests below).
+
+### One-time GitHub setup
+
+1. On GitHub: Settings > Developer settings > Personal access tokens >
+   Fine-grained tokens > Generate new token.
+2. Name it "RouteNav", pick an expiry, and under Account permissions set
+   **Gists** to **Read and write**. Nothing else is needed.
+3. Generate, copy the token, open the planner's Settings and paste it.
+   Leave Gist ID empty: a secret Gist is created on Save.
+4. Copy the "Gist link for the watch" shown in Settings into the Garmin
+   Connect app > RouteNav > Settings > Gist link.
+
+The token is stored only in that phone browser's local storage. It is
+readable by other pages on the same `zitian-ff.github.io` origin (e.g. the
+wiki tool), so keep its permission limited to Gists.
+
+## Route pipeline (PC alternative)
 
 ```
 cd tools
@@ -79,4 +116,6 @@ accuracy are ignored.
 cd tools
 python3 test_gpx_to_route.py   # route pipeline
 python3 test_nav_logic.py      # simulated rides against a mirror of the matching logic
+cd ../planner/test
+python3 make_fixtures.py && node test_routecore.js   # JS port matches Python output
 ```
