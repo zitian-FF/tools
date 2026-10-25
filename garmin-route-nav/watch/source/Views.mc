@@ -105,48 +105,6 @@ class RouteMenuDelegate extends WatchUi.Menu2InputDelegate {
     }
 }
 
-// ---------------------------------------------------------- route summary
-
-// Placeholder for the navigation screen (step 3): confirms the route was
-// downloaded and decoded.
-module RouteSummary {
-
-    function open(route as Route, note as String or Null) as Void {
-        WatchUi.pushView(new RouteSummaryView(route, note), new WatchUi.BehaviorDelegate(),
-                         WatchUi.SLIDE_LEFT);
-    }
-}
-
-class RouteSummaryView extends WatchUi.View {
-
-    private var _route as Route;
-    private var _note as String or Null;
-
-    function initialize(route as Route, note as String or Null) {
-        View.initialize();
-        _route = route;
-        _note = note;
-    }
-
-    function onUpdate(dc as Graphics.Dc) as Void {
-        var w = dc.getWidth();
-        var h = dc.getHeight();
-        dc.setColor(Graphics.COLOR_WHITE, Graphics.COLOR_BLACK);
-        dc.clear();
-        dc.drawText(w / 2, h * 0.25, Graphics.FONT_SMALL, _route.name, CENTER);
-        dc.drawText(w / 2, h * 0.40, Graphics.FONT_MEDIUM, TextUtil.formatKm(_route.distance), CENTER);
-        dc.setColor(Graphics.COLOR_LT_GRAY, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(w / 2, h * 0.54, Graphics.FONT_TINY,
-                    _route.turnCount() + " turns, " + _route.pointCount() + " points", CENTER);
-        if (_note != null) {
-            dc.setColor(Graphics.COLOR_YELLOW, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(w / 2, h * 0.66, Graphics.FONT_XTINY, _note, CENTER);
-        }
-        dc.setColor(Graphics.COLOR_DK_GRAY, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(w / 2, h * 0.80, Graphics.FONT_XTINY, "Navigation: next build", CENTER);
-    }
-}
-
 // --------------------------------------------------------------- message
 
 module Message {

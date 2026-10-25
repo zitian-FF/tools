@@ -2,4 +2,8 @@
     <string id="AppName">RouteNav</string>
     <string id="GistTitle">Gist link</string>
     <string id="GistPrompt">Paste the Gist page link (https://gist.github.com/user/id)</string>
+    <string id="TurnWarnTitle">Turn warning (m)</string>
+    <string id="TurnWarnPrompt">Distance before a turn for the first buzz</string>
+    <string id="OffCourseTitle">Off-course distance (m)</string>
+    <string id="OffCoursePrompt">Distance from the route before the off-course alert</string>
 </strings>

@@ -85,7 +85,7 @@ class Downloader {
             return;
         }
         RouteStore.saveRouteText(id, data);
-        RouteSummary.open(route, null);
+        Nav.open(route, null);
     }
 
     private function openCached(id as String, reason as String) as Void {
@@ -95,7 +95,7 @@ class Downloader {
             Message.show(reason + "\nand no saved copy");
             return;
         }
-        RouteSummary.open(route, "Saved copy (" + reason + ")");
+        Nav.open(route, "Saved copy (" + reason + ")");
     }
 
     private function pruneRemoved(index as Array<Array>) as Void {

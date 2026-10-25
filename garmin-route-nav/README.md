@@ -4,8 +4,9 @@ Turn-by-turn route navigation (no map tiles) for watches without built-in
 courses. Routes are prepared from GPX files, hosted in a GitHub Gist, and
 downloaded to the watch through the paired phone's Garmin Connect app.
 
-Status: steps 1-2 of 5 done (route pipeline; watch app route picker and
-download). Navigation screen, turn alerts and cycling recording are next.
+Status: steps 1-3 of 5 done (route pipeline; route picker and download;
+navigation, turn alerts and cycling recording). Next: getting real routes
+into a Gist, then building and sideloading.
 The watch app has not been compiled yet: the cloud session that wrote it
 cannot reach Garmin's SDK download, so the first build happens locally.
 
@@ -40,12 +41,42 @@ Connect IQ's JSON download can reject.
 - Route list: every route in `routes.txt`, plus "Refresh list".
 - Picking a route downloads a fresh copy through the phone, or uses the
   copy saved on the watch if the phone or Gist can't be reached.
+- Navigation screen (opens when a route is picked):
+  - top: next turn arrow, distance to it, street name when the GPX has one
+  - middle: the route line around you, turning with your direction of
+    travel (heading up); ridden part grey, ahead blue, turns as dots
+  - bottom: speed, distance to finish, ride timer
+  - before reaching the route: distance and arrow to the start
+  - off course: red banner, distance from the route, arrow back to it
+- Buzzes: double buzz at the turn-warning distance (default 150 m), long
+  buzz about 5 s before the turn, triple buzz when off course (default
+  40 m away), short buzz when back on course, finish pattern at the end.
+- Recording: START starts/pauses a cycling activity. BACK opens
+  Resume / Save / Discard (or leaves, if nothing was recorded). Screen taps
+  and swipes are ignored on this screen so a bump can't pause the ride.
+  Saved rides sync to Garmin Connect like any other.
 - The Gist link is set in the Garmin Connect app (RouteNav > Settings), or
   baked in as the default in `resources/properties/properties.xml`. It
   accepts the Gist page link, `user/id`, or the raw URL.
 
+Settings (Garmin Connect app > RouteNav > Settings): Gist link, turn
+warning distance, off-course distance.
+
+### How matching works
+
+Each GPS fix is matched to the nearest point on the route within a window
+around the current progress (100 m back, 400 m ahead). Jumping backwards,
+or further forward than a bike travels between fixes, adds to a match's
+cost, so routes that use the same road twice (out-and-back, lollipop) stay
+on the pass being ridden. If nothing in the window is within the off-course
+distance, the whole route is searched, so shortcuts and detours rejoin
+correctly. Off course needs two bad fixes in a row; fixes with poor GPS
+accuracy are ignored.
+
 ## Tests
 
 ```
-cd tools && python3 test_gpx_to_route.py
+cd tools
+python3 test_gpx_to_route.py   # route pipeline
+python3 test_nav_logic.py      # simulated rides against a mirror of the matching logic
 ```

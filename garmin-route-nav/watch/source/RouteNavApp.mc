@@ -12,6 +12,10 @@ class RouteNavApp extends Application.AppBase {
         return [new HomeView(), new HomeDelegate()];
     }
 
+    function onStop(state as Dictionary?) as Void {
+        Nav.shutdown();
+    }
+
     function onSettingsChanged() as Void {
         WatchUi.requestUpdate();
     }
