@@ -110,9 +110,9 @@ class NavView extends WatchUi.View {
         if (nav.offCourse != _wasOffCourse) {
             _wasOffCourse = nav.offCourse;
             if (nav.offCourse) {
-                vibrate([400, 200, 400, 200, 400]);
+                buzz([400, 200, 400, 200, 400]);
             } else {
-                vibrate([150]);
+                buzz([150]);
             }
         }
         if (nav.offCourse || nav.nextCue < 0) {
@@ -128,15 +128,15 @@ class NavView extends WatchUi.View {
         if (cue > _nowUpTo && nav.cueDist <= nowDist) {
             _nowUpTo = cue;
             _warnedUpTo = cue;
-            vibrate(type == CUE_FINISH ? [300, 150, 300, 150, 800] : [800]);
+            buzz(type == CUE_FINISH ? [300, 150, 300, 150, 800] : [800]);
         } else if (cue > _warnedUpTo && nav.cueDist <= _turnWarn) {
             _warnedUpTo = cue;
-            vibrate([200, 150, 200]);
+            buzz([200, 150, 200]);
         }
     }
 
     // Pattern: on, off, on, ... in milliseconds.
-    private function vibrate(pattern as Array<Number>) as Void {
+    private function buzz(pattern as Array<Number>) as Void {
         if (!(Attention has :vibrate)) {
             return;
         }
@@ -171,10 +171,10 @@ class NavView extends WatchUi.View {
         var s = _session as ActivityRecording.Session;
         if (s.isRecording()) {
             s.stop();
-            vibrate([150]);
+            buzz([150]);
         } else {
             s.start();
-            vibrate([300]);
+            buzz([300]);
         }
         WatchUi.requestUpdate();
     }
