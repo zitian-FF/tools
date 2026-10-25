@@ -1,0 +1,9 @@
+<properties>
+    <!-- Gist page link, "user/id", or a raw base URL. Can be baked in here at
+         build time so nothing has to be typed in the Garmin Connect app. -->
+    <property id="gist" type="string"></property>
+    <!-- Metres before a turn for the first buzz. -->
+    <property id="turnWarn" type="number">150</property>
+    <!-- Metres from the route before the off-course alert. -->
+    <property id="offCourse" type="number">40</property>
+</properties>

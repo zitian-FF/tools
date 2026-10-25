@@ -1,10 +1,14 @@
 # Build status
 
-Baseline snapshot of the wiki14 tool as of this file's creation. Auto-
-overwritten after every push by whichever Claude Code session made it — see
-`AGENTS.md` for the rule. Reflects only the current state, not history.
+Current state of the projects in this repo: the wiki14 tool and, since
+this update, RouteNav (`garmin-route-nav/`, Garmin route navigation; added
+outside the usual three-folder scope at the user's explicit request).
+Auto-overwritten after every push by whichever Claude Code session made it
+(see `AGENTS.md`). Reflects only the current state, not history.
 
 ## Current milestone
+
+### Wiki tool (wiki14)
 
 Sub-phrase (mid-line) styling resolution. Client side and the Worker side
 (`worker-wiki14/index.js`'s `/resolve-subphrase` route) are both complete,
@@ -15,7 +19,17 @@ break between) should now resolve correctly on the live site when it hits
 the direct (line-shape-matched) path; see "Open questions" below for the
 still-unresolved fallback-path case.
 
+### RouteNav (`garmin-route-nav/`)
+
+RouteNav steps 1-4 of 5 committed: route pipeline, Connect IQ watch app
+(route picker, navigation, turn alerts, cycling recording) and the phone
+route planner web page. Step 5 (compile, sideload, real-device testing) is
+next. The watch app has never been compiled: the Connect IQ SDK download
+(developer.garmin.com) is blocked from the cloud session.
+
 ## What was implemented
+
+### Wiki tool (wiki14)
 
 **Pipeline** (`wiki_styler/app.js`):
 - DOM walk → token stream → paragraph/line structure
@@ -100,7 +114,28 @@ filename unchanged. Currently does **not** exercise the new
 `/resolve-subphrase` path — that was verified via one-off scratchpad
 scripts during development, not added to this harness.
 
+### RouteNav (`garmin-route-nav/`)
+
+- `tools/gpx_to_route.py`: GPX to compact RNR1 text route files plus an
+  RNI1 `routes.txt` index (alternate routes). Turn cues from GPX cue
+  waypoints, else geometry (smoothed, peak-picked). Douglas-Peucker to 4 m,
+  max 1500 points, Google polyline encoding.
+- `watch/` (Monkey C, Vivoactive 5): route list from a Gist via the
+  phone, on-watch cache, route matching (`Navigator.mc`), heading-up
+  navigation screen, vibration alerts (turn warning, turn now, off/on
+  course, finish), cycling activity recording, settings for Gist link,
+  turn-warning and off-course distances.
+- `planner/`: GitHub Pages web page (From/To search via Nominatim, up to
+  three BRouter cycling routes, stops, save to a secret Gist through the
+  GitHub API, My routes list). `routecore.js` ports the Python converter.
+- Tests: `tools/test_gpx_to_route.py` (13), `tools/test_nav_logic.py`
+  (simulated rides against a Python mirror of the matching/alert logic),
+  `planner/test/test_routecore.js` (JS output byte-identical to Python;
+  router-hint validation).
+
 ## Key technical decisions
+
+### Wiki tool (wiki14)
 
 - Content mapping is offset/length-based, never delimiter-based — the real
   separator at a given row-to-row seam is a property of that page's markup,
@@ -128,7 +163,21 @@ scripts during development, not added to this harness.
   structure across languages) that caused the original client-side matching
   approach to fail. This is a settled design decision, not an open item.
 
+### RouteNav (`garmin-route-nav/`)
+
+- Route files are plain text, not JSON: Gists serve `text/plain`, which
+  Connect IQ's JSON response type can reject.
+- Matching uses a window around current progress with a cost on implausible
+  backward/forward jumps, so routes reusing a road (out-and-back, lollipop)
+  stay on the ridden pass; global search only when off the window.
+- Router turn hints are verified against geometry; geometry wins on
+  disagreement.
+- `test_nav_logic.py` mirrors `Navigator.mc` by hand; the two must be kept
+  in step when either changes.
+
 ## Open questions
+
+### Wiki tool (wiki14)
 
 - The fallback path (`buildLanguageOutputFallback`) currently degrades ANY
   paragraph containing multiple distinct EN styles straight to plain text +
@@ -155,7 +204,16 @@ scripts during development, not added to this harness.
   brought current, and if so is that in scope for a Claude Code session or
   something the design chat should draft first?
 
+### RouteNav (`garmin-route-nav/`)
+
+- BRouter `voicehints` command numbering and the `timode` value were
+  written from memory (the service is unreachable from the cloud session);
+  geometry validation limits the damage if wrong, but real responses
+  should be checked.
+
 ## Known issues
+
+### Wiki tool (wiki14)
 
 - **Stale documentation**: `README.md` (repo root) and
   `wiki_styler/README.md` both describe out-of-date behavior (see "Open
@@ -171,7 +229,20 @@ scripts during development, not added to this harness.
   used in earlier manual testing (different header sizes, an `<em>` tag) —
   only the gold-bricks/`test_excel3` scenario has a saved fixture.
 
+### RouteNav (`garmin-route-nav/`)
+
+- RouteNav watch app has never been compiled or run on a device; expect
+  compile fixes in step 5.
+- Planner never run against the real Nominatim/BRouter/GitHub services
+  (blocked from the cloud session); only against mocks in a headless
+  browser.
+- The planner's GitHub token lives in localStorage on the shared
+  `zitian-ff.github.io` origin (readable by the wiki tool's pages too);
+  the README tells the user to limit it to Gists.
+
 ## Next proposed step
+
+### Wiki tool (wiki14)
 
 1. Confirm the `ALLOWED_ORIGIN` fix end-to-end with a fresh live test run
    (a `POST` to `/resolve-styles` or `/fetch-sheet` actually succeeding, not
@@ -182,3 +253,9 @@ scripts during development, not added to this harness.
    building.
 3. Decide on the README staleness question before it accumulates further
    drift.
+
+### RouteNav (`garmin-route-nav/`)
+
+RouteNav: user does the one-time GitHub token setup in the planner, then
+step 5: install the Connect IQ SDK locally, compile, fix any compile
+errors, sideload to the Vivoactive 5, and test on a short ride.

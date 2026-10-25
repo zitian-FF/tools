@@ -1,0 +1,11 @@
+<settings>
+    <setting propertyKey="@Properties.gist" title="@Strings.GistTitle" prompt="@Strings.GistPrompt">
+        <settingConfig type="alphaNumeric"/>
+    </setting>
+    <setting propertyKey="@Properties.turnWarn" title="@Strings.TurnWarnTitle" prompt="@Strings.TurnWarnPrompt">
+        <settingConfig type="numeric" min="50" max="500"/>
+    </setting>
+    <setting propertyKey="@Properties.offCourse" title="@Strings.OffCourseTitle" prompt="@Strings.OffCoursePrompt">
+        <settingConfig type="numeric" min="20" max="200"/>
+    </setting>
+</settings>
