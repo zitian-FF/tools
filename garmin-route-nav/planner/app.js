@@ -37,22 +37,26 @@
   let selected = -1;
   let planSeq = 0;    // drops responses from superseded requests
   let previewLayer = null;
+  const PIN_LABEL = "Pin on map";
 
-  function setStart(latlng) {
+  // label: what the From box shows; empty means "my location".
+  function setStart(latlng, label) {
+    $("from").value = label || "";
     if (start) start.setLatLng(latlng);
     else {
       start = L.marker(latlng, { icon: pinIcon("#2e7d32", "S"), draggable: true }).addTo(map);
-      start.on("dragend", plan);
+      start.on("dragend", () => { $("from").value = PIN_LABEL; plan(); });
     }
     plan();
   }
 
   function setDest(latlng, name) {
     destName = name || "";
+    $("q").value = name || PIN_LABEL;
     if (dest) dest.setLatLng(latlng);
     else {
       dest = L.marker(latlng, { icon: pinIcon("#c62828", "&#9873;"), draggable: true }).addTo(map);
-      dest.on("dragend", () => { destName = ""; plan(); });
+      dest.on("dragend", () => { destName = ""; $("q").value = PIN_LABEL; plan(); });
     }
     plan();
   }
@@ -90,30 +94,47 @@
     };
     add("Go here", (ll) => setDest(ll, ""));
     if (start && dest) add("Add stop", addStop);
-    add("Start here", setStart);
+    add("Start here", (ll) => setStart(ll, PIN_LABEL));
     L.popup().setLatLng(e.latlng).setContent(box).openOn(map);
   });
 
-  function locate(thenCenter) {
+  // onLoad: the automatic lookup at page load, which mustn't replace a start
+  // the user already picked while it was running.
+  function locate(onLoad) {
     if (!navigator.geolocation) return status("This browser can't share its location.", "err");
     status("Finding your location...");
     navigator.geolocation.getCurrentPosition((p) => {
-      const ll = L.latLng(p.coords.latitude, p.coords.longitude);
-      if (thenCenter) map.setView(ll, 15);
       status("");
-      setStart(ll);
-    }, () => status("Location not available. Tap the map and choose 'Start here'.", "err"),
+      if (onLoad && start) return;
+      const ll = L.latLng(p.coords.latitude, p.coords.longitude);
+      if (!dest) map.setView(ll, 15, { animate: false });
+      setStart(ll, "");
+    }, () => status("Location not available. Search a start or tap the map.", "err"),
     { enableHighAccuracy: true, timeout: 15000 });
   }
-  $("locate").onclick = () => locate(true);
+  $("locate").onclick = () => locate(false);
 
   // --------------------------------------------------------------- search
 
-  $("searchForm").onsubmit = async (e) => {
+  // Both boxes search the same way; picking a result sets start or destination.
+  $("fromForm").onsubmit = (e) => {
+    e.preventDefault();
+    const q = $("from").value.trim();
+    if (!q || q === PIN_LABEL) return locate(false);   // empty From = my location
+    search(q, $("fromForm"), (ll, name) => setStart(ll, name));
+  };
+  $("searchForm").onsubmit = (e) => {
     e.preventDefault();
     const q = $("q").value.trim();
-    if (!q) return;
-    $("q").blur();
+    if (q && q !== PIN_LABEL) search(q, $("searchForm"), setDest);
+  };
+  // Typing over a "Pin on map" label starts fresh.
+  for (const id of ["from", "q"]) {
+    $(id).addEventListener("focus", () => { if ($(id).value === PIN_LABEL) $(id).value = ""; });
+  }
+
+  async function search(q, form, onPick) {
+    form.querySelector("input").blur();
     const b = map.getBounds();
     const params = new URLSearchParams({
       q, format: "jsonv2", limit: "6", "accept-language": "en",
@@ -123,15 +144,16 @@
     try {
       const res = await fetch(NOMINATIM + "?" + params);
       if (!res.ok) throw new Error("search service returned " + res.status);
-      showResults(await res.json());
+      showResults(await res.json(), form, onPick);
       status("");
     } catch (err) {
       status("Search failed: " + err.message, "err");
     }
-  };
+  }
 
-  function showResults(list) {
+  function showResults(list, form, onPick) {
     const box = $("results");
+    box.style.top = (form.getBoundingClientRect().bottom + 6) + "px";
     box.innerHTML = "";
     if (!list.length) {
       box.innerHTML = "<div>No places found. Try a street or area name, or tap the map.</div>";
@@ -145,7 +167,8 @@
       div.onclick = () => {
         box.classList.add("hidden");
         const ll = L.latLng(+r.lat, +r.lon);
-        setDest(ll, r.name || parts[0]);
+        onPick(ll, r.name || parts[0]);
+        if (!start || !dest) map.setView(ll, 15, { animate: false });
       };
       box.appendChild(div);
     }
@@ -202,7 +225,17 @@
     });
     renderOptions();
     select(0);
-    map.fitBounds(L.featureGroup(results.map((r) => r.layer)).getBounds(), { padding: [40, 40] });
+    fitRoute(L.featureGroup(results.map((r) => r.layer)).getBounds());
+  }
+
+  // Fit a route between the search boxes and the bottom sheet. (Jumps to a
+  // searched place are not animated: Leaflet drops a fit requested while a
+  // zoom animation is still running.)
+  function fitRoute(bounds) {
+    map.fitBounds(bounds, {
+      paddingTopLeft: [24, $("top").getBoundingClientRect().bottom + 16],
+      paddingBottomRight: [24, $("sheet").getBoundingClientRect().height + 16],
+    });
   }
 
   function clearRoutes() {
@@ -385,7 +418,7 @@
     if (previewLayer) map.removeLayer(previewLayer);
     previewLayer = L.polyline(RouteCore.decodePolyline(lines[4]), { color: "#6a1b9a", weight: 6, dashArray: "8 6" })
       .addTo(map);
-    map.fitBounds(previewLayer.getBounds(), { padding: [40, 40] });
+    fitRoute(previewLayer.getBounds());
     status(`Showing saved route "${lines[1]}" (dashed).`);
   }
 

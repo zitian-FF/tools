@@ -17,8 +17,10 @@ Gist, no PC needed. Served by GitHub Pages at
 `https://zitian-ff.github.io/tools/garmin-route-nav/planner/` once merged
 to `main`.
 
-- Start is the phone's location (or tap the map); search a destination or
-  tap the map; tap the map again to add stops; drag any pin to adjust.
+- From / To boxes: start defaults to the phone's location; search either
+  box or tap the map ("Start here" / "Go here"). Clearing From and
+  searching goes back to the current location. Tap the map to add stops;
+  drag any pin to adjust.
 - Shows up to three cycling routes from BRouter (fastest, quieter,
   alternative) with distance, time and climb. Save one, then pick another
   and save it too for alternates on the watch.
