@@ -1,0 +1,4 @@
+project.manifest = manifest.xml
+# hooks/release holds the no-op test hooks; tools/screenshots.sh builds with
+# a generated hooks folder instead to pin time, battery, girl and sleep state.
+base.sourcePath = source;hooks/release

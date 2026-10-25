@@ -1,0 +1,4 @@
+<fonts>
+    <font id="HourFont" filename="hour.fnt" antialias="true" filter="0123456789"/>
+    <font id="MinuteFont" filename="minute.fnt" antialias="true" filter="0123456789"/>
+</fonts>

@@ -1,0 +1,55 @@
+<settings>
+    <setting propertyKey="@Properties.rotationMode" title="@Strings.ModeTitle">
+        <settingConfig type="list">
+            <listEntry value="0">@Strings.ModeWake</listEntry>
+            <listEntry value="1">@Strings.ModeInterval</listEntry>
+            <listEntry value="2">@Strings.ModeFixed</listEntry>
+        </settingConfig>
+    </setting>
+    <setting propertyKey="@Properties.intervalSec" title="@Strings.IntervalTitle">
+        <settingConfig type="list">
+            <listEntry value="3">@Strings.Sec3</listEntry>
+            <listEntry value="5">@Strings.Sec5</listEntry>
+            <listEntry value="10">@Strings.Sec10</listEntry>
+        </settingConfig>
+    </setting>
+    <setting propertyKey="@Properties.remember" title="@Strings.RememberTitle">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.startGirl" title="@Strings.StartTitle">
+        <settingConfig type="list">
+            <listEntry value="0">@Strings.Gemma</listEntry>
+            <listEntry value="1">@Strings.Gptee</listEntry>
+            <listEntry value="2">@Strings.Claudia</listEntry>
+            <listEntry value="3">@Strings.DSeeker</listEntry>
+            <listEntry value="4">@Strings.Myuse</listEntry>
+            <listEntry value="5">@Strings.Roxxy</listEntry>
+            <listEntry value="6">@Strings.Kimi</listEntry>
+            <listEntry value="7">@Strings.Cid</listEntry>
+        </settingConfig>
+    </setting>
+    <setting propertyKey="@Properties.show_gemma" title="@Strings.ShowGemma">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.show_gptee" title="@Strings.ShowGptee">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.show_claudia" title="@Strings.ShowClaudia">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.show_d_seeker" title="@Strings.ShowDSeeker">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.show_myuse" title="@Strings.ShowMyuse">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.show_roxxy" title="@Strings.ShowRoxxy">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.show_kimi" title="@Strings.ShowKimi">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.show_cid" title="@Strings.ShowCid">
+        <settingConfig type="boolean"/>
+    </setting>
+</settings>
