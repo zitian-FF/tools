@@ -1,0 +1,18 @@
+import Toybox.Application;
+import Toybox.Lang;
+import Toybox.WatchUi;
+
+class RouteNavApp extends Application.AppBase {
+
+    function initialize() {
+        AppBase.initialize();
+    }
+
+    function getInitialView() {
+        return [new HomeView(), new HomeDelegate()];
+    }
+
+    function onSettingsChanged() as Void {
+        WatchUi.requestUpdate();
+    }
+}

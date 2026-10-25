@@ -1,0 +1,5 @@
+<settings>
+    <setting propertyKey="@Properties.gist" title="@Strings.GistTitle" prompt="@Strings.GistPrompt">
+        <settingConfig type="alphaNumeric"/>
+    </setting>
+</settings>

@@ -1,0 +1,5 @@
+<strings>
+    <string id="AppName">RouteNav</string>
+    <string id="GistTitle">Gist link</string>
+    <string id="GistPrompt">Paste the Gist page link (https://gist.github.com/user/id)</string>
+</strings>

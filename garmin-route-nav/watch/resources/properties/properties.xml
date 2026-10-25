@@ -1,0 +1,5 @@
+<properties>
+    <!-- Gist page link, "user/id", or a raw base URL. Can be baked in here at
+         build time so nothing has to be typed in the Garmin Connect app. -->
+    <property id="gist" type="string"></property>
+</properties>

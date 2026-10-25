@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Tests for gpx_to_route.py. Run: python3 test_gpx_to_route.py"""
 
-import json
 import math
 import os
 import random
@@ -143,18 +142,29 @@ class RouteTest(unittest.TestCase):
             g.main([src, "--name", "Coast Loop", "--out", out])
             g.main([src, "--name", "Hill Option", "--out", out])
             g.main([src, "--name", "Coast Loop", "--out", out])  # replace, not duplicate
-            idx = load(os.path.join(out, "routes.json"))
-            self.assertEqual([r["id"] for r in idx["routes"]], ["hill-option", "coast-loop"])
-            self.assertTrue(os.path.exists(os.path.join(out, "coast-loop.json")))
+            idx = g.load_index(out)
+            self.assertEqual([r["id"] for r in idx], ["hill-option", "coast-loop"])
+            with open(os.path.join(out, "routes.txt")) as f:
+                self.assertEqual(f.read().split("\n")[0], "RNI1")
+            with open(os.path.join(out, "coast-loop.txt")) as f:
+                route = g.parse_route(f.read())
+            self.assertEqual(route["name"], "Coast Loop")
+            self.assertEqual(route["cues"][-1][1], g.CUE_FINISH)
             g.main(["--remove", "hill-option", "--out", out])
-            idx = load(os.path.join(out, "routes.json"))
-            self.assertEqual([r["id"] for r in idx["routes"]], ["coast-loop"])
-            self.assertFalse(os.path.exists(os.path.join(out, "hill-option.json")))
+            self.assertEqual([r["id"] for r in g.load_index(out)], ["coast-loop"])
+            self.assertFalse(os.path.exists(os.path.join(out, "hill-option.txt")))
 
-
-def load(path):
-    with open(path) as f:
-        return json.load(f)
+    def test_text_format_roundtrip_and_separators(self):
+        track = walk([(0, 500), (90, 500)])
+        wpts = [(track[100][0], track[100][1], "Right onto Main St, then", "Right")]
+        route, _ = self.build(gpx(track, wpts), name="Loop | A; B")
+        text = g.format_route(route)
+        self.assertEqual(len(text.split("\n")), 6)  # 5 lines + trailing newline
+        back = g.parse_route(text)
+        self.assertEqual(back["name"], "Loop A B")
+        self.assertEqual(back["cues"][0][2], "Main St then")
+        self.assertEqual(back["pts"], route["pts"])
+        self.assertEqual(back["dist"], route["dist"])
 
 
 def seg_dist(p, a, b):

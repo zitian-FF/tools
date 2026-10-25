@@ -5,14 +5,23 @@ Usage:
     python3 gpx_to_route.py ride.gpx --name "Coast loop" [--out ../routes]
     python3 gpx_to_route.py --remove coast-loop [--out ../routes]
 
-Each run writes <id>.json and updates routes.json (the index the watch reads
+Each run writes <id>.txt and updates routes.txt (the index the watch reads
 to offer a choice of routes). Upload everything in the output folder to the
 Gist. Standard library only.
 
-Route file format (v1):
-    {"v": 1, "name": str, "dist": metres,
-     "pts": Google-encoded polyline (precision 5),
-     "cues": [[point_index, cue_type, "optional label"], ...]}
+Files are plain text because Gists serve text/plain, which Connect IQ's JSON
+download can reject; text is also cheaper to hold on the watch.
+
+Index file (routes.txt), one route per line after the header:
+    RNI1
+    id|name|distance_m|file
+
+Route file (<id>.txt), four lines:
+    RNR1
+    name
+    distance_m
+    point_index,cue_type[,label];point_index,cue_type[,label];...
+    Google-encoded polyline (precision 5)
 
 Cue types: see CUE_* below. Turn cues come from the GPX itself when it has
 them (waypoints / route points named like "Turn left"), otherwise they are
@@ -21,7 +30,6 @@ detected from the route's geometry.
 
 import argparse
 import bisect
-import json
 import math
 import os
 import re
@@ -375,7 +383,6 @@ def build_route(path, name):
         out_cues.append([remap[idx], kind, label] if label else [remap[idx], kind])
 
     route = {
-        "v": 1,
         "name": name,
         "dist": round(cum[-1]),
         "pts": encode_polyline(simple),
@@ -392,17 +399,51 @@ def slugify(name):
     return s[:40] or "route"
 
 
+def clean(text):
+    """Strip the separators used by the text formats."""
+    return re.sub(r"\s+", " ", re.sub(r"[|;,\r\n]", " ", text)).strip()
+
+
+def format_route(route):
+    cues = ";".join(",".join(str(x) if i < 2 else clean(x) for i, x in enumerate(c))
+                    for c in route["cues"])
+    return "\n".join(["RNR1", clean(route["name"]), str(route["dist"]), cues,
+                      route["pts"]]) + "\n"
+
+
+def parse_route(text):
+    lines = text.split("\n")
+    if lines[0] != "RNR1":
+        raise ValueError("not a RouteNav route file")
+    cues = []
+    for c in filter(None, lines[3].split(";")):
+        f = c.split(",")
+        cues.append([int(f[0]), int(f[1])] + f[2:3])
+    return {"name": lines[1], "dist": int(lines[2]), "cues": cues, "pts": lines[4]}
+
+
 def load_index(out_dir):
-    path = os.path.join(out_dir, "routes.json")
+    path = os.path.join(out_dir, "routes.txt")
+    routes = []
     if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return {"v": 1, "routes": []}
+        with open(path, encoding="utf-8") as f:
+            for line in f.read().split("\n")[1:]:
+                if line:
+                    rid, name, dist, filename = line.split("|")
+                    routes.append({"id": rid, "name": name, "dist": int(dist),
+                                   "file": filename})
+    return routes
 
 
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
+def save_index(out_dir, routes):
+    lines = ["RNI1"] + ["|".join([r["id"], clean(r["name"]), str(r["dist"]), r["file"]])
+                        for r in routes]
+    write_text(os.path.join(out_dir, "routes.txt"), "\n".join(lines) + "\n")
+
+
+def write_text(path, text):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
 
 
 def main(argv=None):
@@ -418,11 +459,11 @@ def main(argv=None):
     index = load_index(args.out)
 
     if args.remove:
-        index["routes"] = [r for r in index["routes"] if r["id"] != args.remove]
-        f = os.path.join(args.out, args.remove + ".json")
+        index = [r for r in index if r["id"] != args.remove]
+        f = os.path.join(args.out, args.remove + ".txt")
         if os.path.exists(f):
             os.remove(f)
-        save_json(os.path.join(args.out, "routes.json"), index)
+        save_index(args.out, index)
         print("removed", args.remove)
         return 0
 
@@ -432,11 +473,11 @@ def main(argv=None):
     rid = args.id or slugify(name)
     route, stats = build_route(args.gpx, name)
 
-    filename = rid + ".json"
-    save_json(os.path.join(args.out, filename), route)
+    filename = rid + ".txt"
+    write_text(os.path.join(args.out, filename), format_route(route))
     entry = {"id": rid, "name": name, "dist": route["dist"], "file": filename}
-    index["routes"] = [r for r in index["routes"] if r["id"] != rid] + [entry]
-    save_json(os.path.join(args.out, "routes.json"), index)
+    index = [r for r in index if r["id"] != rid] + [entry]
+    save_index(args.out, index)
 
     size = os.path.getsize(os.path.join(args.out, filename))
     print(f"{name}: {route['dist'] / 1000:.1f} km, {stats['points_in']} -> "
