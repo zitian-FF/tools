@@ -1,17 +1,16 @@
-import Toybox.Activity;
-import Toybox.ActivityRecording;
 import Toybox.Application;
 import Toybox.Attention;
 import Toybox.Graphics;
 import Toybox.Lang;
 import Toybox.Math;
 import Toybox.Position;
+import Toybox.System;
 import Toybox.Timer;
 import Toybox.WatchUi;
 
-// Navigation screen: heading-up route line, next turn, alerts and the
-// cycling recording. START starts/pauses recording; BACK opens the stop menu
-// (or leaves, if nothing was recorded).
+// Navigation screen: heading-up route line, next turn and alerts. No
+// activity recording: the vivoactive 5 rejects sideloaded apps that request
+// the Fit permission. BACK asks before leaving the route.
 module Nav {
 
     var active as NavView or Null;
@@ -22,10 +21,10 @@ module Nav {
         WatchUi.pushView(view, new NavDelegate(view), WatchUi.SLIDE_LEFT);
     }
 
-    // Called when the app closes, so a ride in progress isn't lost.
+    // Called when the app closes: release GPS.
     function shutdown() as Void {
         if (active != null) {
-            (active as NavView).finish(true);
+            (active as NavView).finish();
         }
     }
 
@@ -43,7 +42,7 @@ class NavView extends WatchUi.View {
 
     private var _nav as Navigator;
     private var _note as String or Null;
-    private var _session as ActivityRecording.Session or Null;
+    private var _startedAt as Number;   // System.getTimer() when the route opened
     private var _timer as Timer.Timer;
     private var _turnWarn as Number;
     private var _heading as Float;      // degrees, map up direction
@@ -55,12 +54,13 @@ class NavView extends WatchUi.View {
     private var _nowUpTo as Number;
     private var _wasOffCourse as Boolean;
     private var _closed as Boolean;
+    var exitRequested as Boolean;
 
     function initialize(route as Route, note as String or Null) {
         View.initialize();
         _nav = new Navigator(route, Nav.setting("offCourse", 40));
         _note = note;
-        _session = null;
+        _startedAt = System.getTimer();
         _turnWarn = Nav.setting("turnWarn", 150);
         _heading = _nav.routeBearing;
         _speed = 0.0;
@@ -69,6 +69,7 @@ class NavView extends WatchUi.View {
         _nowUpTo = -1;
         _wasOffCourse = false;
         _closed = false;
+        exitRequested = false;
         _timer = new Timer.Timer();
         Position.enableLocationEvents(Position.LOCATION_CONTINUOUS, method(:onPosition));
         _timer.start(method(:onTick), 1000, true);
@@ -150,61 +151,21 @@ class NavView extends WatchUi.View {
         }
     }
 
-    // --------------------------------------------------------- recording
-
-    function isRecording() as Boolean {
-        return _session != null && (_session as ActivityRecording.Session).isRecording();
-    }
-
-    function hasSession() as Boolean {
-        return _session != null;
-    }
-
-    function startStop() as Void {
-        if (_session == null) {
-            _session = ActivityRecording.createSession({
-                :name => "Ride",
-                :sport => Activity.SPORT_CYCLING,
-                :subSport => Activity.SUB_SPORT_ROAD
-            });
-        }
-        var s = _session as ActivityRecording.Session;
-        if (s.isRecording()) {
-            s.stop();
-            buzz([150]);
-        } else {
-            s.start();
-            buzz([300]);
-        }
-        WatchUi.requestUpdate();
-    }
-
-    function resume() as Void {
-        if (_session != null && !isRecording()) {
-            (_session as ActivityRecording.Session).start();
+    function onShow() as Void {
+        if (exitRequested) {
+            finish();
+            WatchUi.popView(WatchUi.SLIDE_RIGHT);
         }
     }
 
-    // Stops GPS and ends the recording, saving or discarding it.
-    function finish(save as Boolean) as Void {
+    // Stops GPS.
+    function finish() as Void {
         if (_closed) {
             return;
         }
         _closed = true;
         _timer.stop();
         Position.enableLocationEvents(Position.LOCATION_DISABLE, method(:onPosition));
-        if (_session != null) {
-            var s = _session as ActivityRecording.Session;
-            if (s.isRecording()) {
-                s.stop();
-            }
-            if (save) {
-                s.save();
-            } else {
-                s.discard();
-            }
-            _session = null;
-        }
         Nav.active = null;
     }
 
@@ -333,9 +294,7 @@ class NavView extends WatchUi.View {
 
     private function drawBottom(dc as Graphics.Dc, w as Number, h as Number) as Void {
         var C = Graphics.TEXT_JUSTIFY_CENTER | Graphics.TEXT_JUSTIFY_VCENTER;
-        var info = Activity.getActivityInfo();
-        var timer = info != null && info.timerTime != null ? info.timerTime as Number : 0;
-        var secs = timer / 1000;
+        var secs = (System.getTimer() - _startedAt) / 1000;
         var time = secs >= 3600
             ? (secs / 3600) + ":" + ((secs / 60) % 60).format("%02d") + ":" + (secs % 60).format("%02d")
             : (secs / 60) + ":" + (secs % 60).format("%02d");
@@ -344,14 +303,8 @@ class NavView extends WatchUi.View {
         dc.drawText(w * 0.33, h * 0.86, Graphics.FONT_TINY, (_speed * 3.6).format("%.0f") + " km/h", C);
         dc.drawText(w * 0.67, h * 0.86, Graphics.FONT_TINY, distText(_nav.remaining), C);
 
-        if (!hasSession() || !isRecording()) {
-            dc.setColor(Graphics.COLOR_YELLOW, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(w / 2, h * 0.94, Graphics.FONT_XTINY,
-                        hasSession() ? "Paused " + time : "START to record", C);
-        } else {
-            dc.setColor(Graphics.COLOR_GREEN, Graphics.COLOR_TRANSPARENT);
-            dc.drawText(w / 2, h * 0.94, Graphics.FONT_XTINY, time, C);
-        }
+        dc.setColor(Graphics.COLOR_LT_GRAY, Graphics.COLOR_TRANSPARENT);
+        dc.drawText(w / 2, h * 0.94, Graphics.FONT_XTINY, time, C);
     }
 
     // Arrow showing the turn: stem up from the bottom, then bending by the
@@ -441,16 +394,8 @@ class NavDelegate extends WatchUi.BehaviorDelegate {
         _view = view;
     }
 
-    // The START button only; screen taps are ignored so a sweaty wrist or a
-    // bump can't pause the ride.
-    function onKey(evt as WatchUi.KeyEvent) as Boolean {
-        if (evt.getKey() == WatchUi.KEY_ENTER) {
-            _view.startStop();
-            return true;
-        }
-        return false;
-    }
-
+    // Screen taps, swipes and START do nothing here, so a sweaty wrist or a
+    // bump can't leave the route.
     function onTap(evt as WatchUi.ClickEvent) as Boolean {
         return true;
     }
@@ -459,62 +404,33 @@ class NavDelegate extends WatchUi.BehaviorDelegate {
         return true;
     }
 
-    function onBack() as Boolean {
-        if (!_view.hasSession()) {
-            _view.finish(false);
-            WatchUi.popView(WatchUi.SLIDE_RIGHT);
-            return true;
-        }
-        var wasRecording = _view.isRecording();
-        if (wasRecording) {
-            _view.startStop();   // pause while deciding
-        }
-        var menu = new WatchUi.Menu2({:title => "Ride"});
-        menu.addItem(new WatchUi.MenuItem("Resume", null, :resume, {}));
-        menu.addItem(new WatchUi.MenuItem("Save", null, :save, {}));
-        menu.addItem(new WatchUi.MenuItem("Discard", null, :discard, {}));
-        WatchUi.pushView(menu, new StopMenuDelegate(_view, wasRecording), WatchUi.SLIDE_UP);
+    function onSwipe(evt as WatchUi.SwipeEvent) as Boolean {
         return true;
     }
 
-    // Swipes would otherwise act as Back on some devices.
-    function onSwipe(evt as WatchUi.SwipeEvent) as Boolean {
+    function onBack() as Boolean {
+        WatchUi.pushView(new WatchUi.Confirmation("Exit route?"), new ExitConfirmDelegate(_view),
+                         WatchUi.SLIDE_IMMEDIATE);
         return true;
     }
 }
 
-class StopMenuDelegate extends WatchUi.Menu2InputDelegate {
+class ExitConfirmDelegate extends WatchUi.ConfirmationDelegate {
 
     private var _view as NavView;
-    private var _wasRecording as Boolean;
 
-    function initialize(view as NavView, wasRecording as Boolean) {
-        Menu2InputDelegate.initialize();
+    function initialize(view as NavView) {
+        ConfirmationDelegate.initialize();
         _view = view;
-        _wasRecording = wasRecording;
     }
 
-    function onSelect(item as WatchUi.MenuItem) as Void {
-        var id = item.getId();
-        if (id == :resume) {
-            _view.resume();
-            WatchUi.popView(WatchUi.SLIDE_DOWN);
-            return;
+    // The confirmation closes itself. On yes, the navigation screen closes
+    // when it is shown again (see NavView.onShow), so only one view is popped
+    // per step.
+    function onResponse(response as WatchUi.Confirm) as Boolean {
+        if (response == WatchUi.CONFIRM_YES) {
+            _view.exitRequested = true;
         }
-        var save = id == :save;
-        _view.finish(save);
-        // Close the menu, then replace the navigation screen with a message;
-        // dismissing it returns to the route list.
-        WatchUi.popView(WatchUi.SLIDE_IMMEDIATE);
-        WatchUi.switchToView(new MessageView(save ? "Ride saved" : "Ride discarded"),
-                             new MessageDelegate(), WatchUi.SLIDE_IMMEDIATE);
-    }
-
-    // Back out of the menu: carry on as before it opened.
-    function onBack() as Void {
-        if (_wasRecording) {
-            _view.resume();
-        }
-        WatchUi.popView(WatchUi.SLIDE_DOWN);
+        return true;
     }
 }

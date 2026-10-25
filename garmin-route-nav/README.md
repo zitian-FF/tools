@@ -4,11 +4,11 @@ Turn-by-turn route navigation (no map tiles) for watches without built-in
 courses. Routes are prepared from GPX files, hosted in a GitHub Gist, and
 downloaded to the watch through the paired phone's Garmin Connect app.
 
-Status: steps 1-4 of 5 done (route pipeline; route picker and download;
-navigation, turn alerts and cycling recording; phone route planner).
-Next: building and sideloading.
-The watch app has not been compiled yet: the cloud session that wrote it
-cannot reach Garmin's SDK download, so the first build happens locally.
+Status: route pipeline, watch app (route picker, navigation, turn alerts)
+and phone route planner done; the watch app builds cleanly with SDK 9.3.0
+and is being tested on the user's watch. No ride recording: the vivoactive 5
+silently rejects sideloaded apps that request the Fit permission (found by
+installing one-permission test apps), so recording was dropped.
 
 ## Phone route planner (`planner/`)
 
@@ -84,16 +84,15 @@ Connect IQ's JSON download can reject.
   - top: next turn arrow, distance to it, street name when the GPX has one
   - middle: the route line around you, turning with your direction of
     travel (heading up); ridden part grey, ahead blue, turns as dots
-  - bottom: speed, distance to finish, ride timer
+  - bottom: speed, distance to finish, time since the route was opened
   - before reaching the route: distance and arrow to the start
   - off course: red banner, distance from the route, arrow back to it
 - Buzzes: double buzz at the turn-warning distance (default 150 m), long
   buzz about 5 s before the turn, triple buzz when off course (default
   40 m away), short buzz when back on course, finish pattern at the end.
-- Recording: START starts/pauses a cycling activity. BACK opens
-  Resume / Save / Discard (or leaves, if nothing was recorded). Screen taps
-  and swipes are ignored on this screen so a bump can't pause the ride.
-  Saved rides sync to Garmin Connect like any other.
+- BACK asks "Exit route?" before leaving. Screen taps, swipes and START are
+  ignored on this screen so a bump can't leave the route. No activity is
+  recorded (see Status).
 - The Gist link is set in the Garmin Connect app (RouteNav > Settings), or
   baked in as the default in `resources/properties/properties.xml`. It
   accepts the Gist page link, `user/id`, or the raw URL.

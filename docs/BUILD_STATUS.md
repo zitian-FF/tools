@@ -22,9 +22,9 @@ still-unresolved fallback-path case.
 
 ### RouteNav (`garmin-route-nav/`)
 
-RouteNav steps 1-4 done and the watch app now compiles cleanly (SDK 9.3.0,
-vivoactive5 device files supplied by the user); PRG handed to the user for
-sideloading and real-device testing.
+RouteNav watch app compiles cleanly (SDK 9.3.0) and has been reworked
+without ride recording after the watch rejected it on sideload; new PRG
+handed to the user for real-device testing.
 
 ### AI Girls watch face (`garmin-watchface/`)
 
@@ -127,7 +127,7 @@ scripts during development, not added to this harness.
 - `watch/` (Monkey C, Vivoactive 5): route list from a Gist via the
   phone, on-watch cache, route matching (`Navigator.mc`), heading-up
   navigation screen, vibration alerts (turn warning, turn now, off/on
-  course, finish), cycling activity recording, settings for Gist link,
+  course, finish), exit confirmation (recording removed), settings for Gist link,
   turn-warning and off-course distances.
 - `planner/`: GitHub Pages web page (From/To search via Nominatim, up to
   three BRouter cycling routes, stops, save to a secret Gist through the
@@ -259,8 +259,12 @@ scripts during development, not added to this harness.
 
 ### RouteNav (`garmin-route-nav/`)
 
-- RouteNav watch app compiles but has not run on a device, and could not
-  run in the simulator (it uses system fonts the cloud simulator lacks).
+- RouteNav watch app has not yet run on a device, and could not run in the
+  simulator (it uses system fonts the cloud simulator lacks).
+- The vivoactive 5 silently rejects sideloaded apps requesting the Fit
+  permission (bisected with one-permission test apps: Communications,
+  Positioning and Sensor install; Fit does not). Ride recording was removed
+  at the user's choice; a Connect IQ Store beta could restore it.
 - Planner never run against the real Nominatim/BRouter/GitHub services
   (blocked from the cloud session); only against mocks in a headless
   browser.
